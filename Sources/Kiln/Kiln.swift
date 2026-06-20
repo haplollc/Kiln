@@ -48,6 +48,82 @@ public enum Kiln {
     /// Convenience flag: returns the latest known version of the Kiln
     /// public API. Bumped on breaking changes.
     public static let version: String = "0.1.0"
+
+    // MARK: - Native bridges (host capabilities)
+
+    /// Register a native Swift function the interpreted code can call by name —
+    /// the way to expose real Apple-framework capabilities (HealthKit, haptics,
+    /// device info, Calendar, …) to Kiln apps. The closure receives the call's
+    /// evaluated arguments and returns a value.
+    ///
+    /// ```swift
+    /// Kiln.register("Haptics.play") { _ in
+    ///     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    ///     return .null
+    /// }
+    /// // interpreted app: Haptics.play()
+    /// ```
+    ///
+    /// Use a bare name (`steps`) for a global function, or `Type.method`
+    /// (`Health.steps`) for a namespaced call.
+    @MainActor
+    public static func register(_ name: String, _ fn: @escaping ([KilnValue]) -> KilnValue) {
+        SwiftRunnerState.nativeBridges[name] = { values in
+            KilnValue.toInternal(fn(values.map(KilnValue.fromInternal)))
+        }
+    }
+
+    /// Remove a previously registered bridge.
+    @MainActor
+    public static func unregister(_ name: String) {
+        SwiftRunnerState.nativeBridges[name] = nil
+    }
+}
+
+// MARK: - KilnValue (public bridge value)
+
+/// The value type passed to/from native bridges registered via `Kiln.register`.
+/// Mirrors the interpreter's internal JSON-shaped value model.
+public enum KilnValue: Equatable, Sendable {
+    case number(Double)
+    case string(String)
+    case bool(Bool)
+    case array([KilnValue])
+    case object([String: KilnValue])
+    case null
+
+    /// Read a number regardless of stored numeric/bool/string form.
+    public var doubleValue: Double? {
+        switch self {
+        case .number(let n): return n
+        case .bool(let b): return b ? 1 : 0
+        case .string(let s): return Double(s)
+        default: return nil
+        }
+    }
+    public var stringValue: String? { if case .string(let s) = self { return s }; return nil }
+
+    // Internal <-> public conversions (`Value` is module-internal).
+    static func fromInternal(_ v: Value) -> KilnValue {
+        switch v {
+        case .number(let n): return .number(n)
+        case .string(let s): return .string(s)
+        case .boolean(let b): return .bool(b)
+        case .array(let a): return .array(a.map(fromInternal))
+        case .object(let o): return .object(o.mapValues(fromInternal))
+        case .nil: return .null
+        }
+    }
+    static func toInternal(_ v: KilnValue) -> Value {
+        switch v {
+        case .number(let n): return .number(n)
+        case .string(let s): return .string(s)
+        case .bool(let b): return .boolean(b)
+        case .array(let a): return .array(a.map(toInternal))
+        case .object(let o): return .object(o.mapValues(toInternal))
+        case .null: return .nil
+        }
+    }
 }
 
 // MARK: - Result

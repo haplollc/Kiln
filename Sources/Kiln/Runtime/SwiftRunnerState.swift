@@ -26,6 +26,13 @@ public final class SwiftRunnerState: ObservableObject {
     // and execute the body under a fresh parameter scope.
     public var functions: [String: ViewNode] = [:]
 
+    /// Host-injected native functions (registered via `Kiln.register`). Checked
+    /// after user-defined functions but before built-ins, so an embedding app can
+    /// expose real Apple-framework capabilities (HealthKit, haptics, device info,
+    /// Calendar, …) to interpreted code as plain function calls. Keyed by the
+    /// call name (bare, e.g. `steps`, or namespaced, e.g. `Health.steps`).
+    public static var nativeBridges: [String: ([Value]) -> Value] = [:]
+
     /// Plan 5 capstone: per-struct field-type schemas (copied from SwiftParser
     /// after parsing). Keyed by `TypeName → FieldName → InnerTypeName` where
     /// `InnerTypeName` is the first identifier in the field's type annotation
@@ -672,6 +679,10 @@ public final class SwiftRunnerState: ObservableObject {
                 let key = "\(typeName).\(method)"
                 if functions[key] != nil {
                     return callUserFunction(key: key, arguments: args)
+                }
+                // Host-injected namespaced bridge, e.g. `Health.steps()`.
+                if let bridge = Self.nativeBridges[key] {
+                    return bridge(args.map { evaluate($0.value) })
                 }
             }
             return evaluateMethodCall(obj: evaluate(obj), method: method, args: args)
@@ -1512,6 +1523,12 @@ public final class SwiftRunnerState: ObservableObject {
         let scopedMatches = functions.keys.filter { $0.hasSuffix(suffix) }
         if scopedMatches.count == 1 {
             return callUserFunction(key: scopedMatches[0], arguments: arguments)
+        }
+
+        // Host-injected native bridges (Kiln.register). Evaluate the args to
+        // values and hand them to the embedding app's closure.
+        if let bridge = Self.nativeBridges[name] {
+            return bridge(arguments.map { evaluate($0.value) })
         }
 
         switch name {
