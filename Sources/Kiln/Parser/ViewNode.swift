@@ -7,6 +7,9 @@
 
 import Foundation
 
+/// Convenience chart kinds for `BarChart` / `LineChart`.
+public enum KilnChartKind: Equatable { case bar, line }
+
 /// AST node representing a SwiftUI view or expression
 public indirect enum ViewNode: Equatable {
     // MARK: - View Components
@@ -204,6 +207,12 @@ public indirect enum ViewNode: Equatable {
 
     /// LinearGradient(colors: [...], startPoint: ..., endPoint: ...)
     case linearGradient(colors: [ColorValue], startPoint: UnitPoint, endPoint: UnitPoint)
+
+    /// Convenience chart views backed by the real Swift `Charts` framework:
+    /// `BarChart(data)` / `LineChart(data)`. `data` evaluates to an array of
+    /// numbers, or of objects with a numeric `value`/`y`/`amount` (and optional
+    /// `label`/`name`/`x`).
+    case chart(kind: KilnChartKind, data: ViewNode)
 
     /// AsyncImage(url: ...) { phase in switch phase { case .empty: ... } }
     /// Holds per-phase view branches. Success branch's `imageBinding` names the
@@ -463,6 +472,11 @@ public enum ViewModifier: Equatable {
     case fill(ColorValue)
     case stroke(ColorValue, lineWidth: Double)
     case clipped
+
+    /// `.dragToMove()` — makes the view draggable with the finger (manages its
+    /// own offset natively; springs back on release). A reliable gesture for
+    /// cards/game pieces without wiring interpreted state.
+    case dragToMove
 
     // Image
     case resizable

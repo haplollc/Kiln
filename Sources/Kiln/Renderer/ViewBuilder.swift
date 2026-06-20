@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Charts
 
 /// Renders ViewNode AST to SwiftUI views
 @MainActor
@@ -459,6 +460,10 @@ public struct DynamicViewBuilder {
                     endPoint: mapUnitPoint(endPoint)
                 )
             )
+
+        case .chart(let kind, let data):
+            let points = DynamicViewBuilder.chartPoints(from: state?.evaluate(data) ?? .nil)
+            return AnyView(KilnChartView(kind: kind, points: points))
 
         // MARK: Plan 8 — phased AsyncImage
         case .asyncImagePhased(let urlExpression, let emptyBranch, let successBranch, let failureBranch, let imageBinding):
@@ -957,6 +962,8 @@ public struct DynamicViewBuilder {
             ))
         case .clipped:
             return AnyView(view.clipped())
+        case .dragToMove:
+            return AnyView(KilnDragToMove(wrapped: view))
         case .resizable:
             // resizable() only works on Image — return view as-is for non-images
             return view
@@ -1681,5 +1688,89 @@ public struct RunResult {
         self.view = view
         self.consoleOutput = consoleOutput
         self.errors = errors
+    }
+}
+
+// MARK: - Charts (BarChart / LineChart convenience views)
+
+extension DynamicViewBuilder {
+    /// Normalizes a runtime value into chart points. Accepts an array of
+    /// numbers, or of objects with a numeric `value`/`y`/`amount` and an
+    /// optional `label`/`name`/`x`.
+    static func chartPoints(from value: Value) -> [KilnChartPoint] {
+        guard case .array(let items) = value else { return [] }
+        return items.enumerated().compactMap { (i, item) in
+            switch item {
+            case .number(let n):
+                return KilnChartPoint(label: "\(i + 1)", value: n)
+            case .object(let dict):
+                let v = dict["value"] ?? dict["y"] ?? dict["amount"] ?? dict["count"]
+                guard case .number(let n)? = v else { return nil }
+                let labelVal = dict["label"] ?? dict["name"] ?? dict["x"]
+                let label: String
+                if case .string(let s)? = labelVal { label = s }
+                else if case .number(let ln)? = labelVal { label = ln == ln.rounded() ? String(Int(ln)) : String(ln) }
+                else { label = "\(i + 1)" }
+                return KilnChartPoint(label: label, value: n)
+            default:
+                return nil
+            }
+        }
+    }
+}
+
+/// One bar/line data point.
+public struct KilnChartPoint: Identifiable {
+    public let id = UUID()
+    public let label: String
+    public let value: Double
+}
+
+/// Renders chart points with the real Swift `Charts` framework.
+@MainActor
+struct KilnChartView: View {
+    let kind: KilnChartKind
+    let points: [KilnChartPoint]
+
+    var body: some View {
+        Group {
+            switch kind {
+            case .bar:
+                Chart(points) { p in
+                    BarMark(x: .value("Label", p.label), y: .value("Value", p.value))
+                }
+            case .line:
+                Chart(points) { p in
+                    LineMark(x: .value("Label", p.label), y: .value("Value", p.value))
+                    PointMark(x: .value("Label", p.label), y: .value("Value", p.value))
+                }
+            }
+        }
+        .frame(minHeight: 180)
+        .padding()
+    }
+}
+
+/// `.dragToMove()` — a self-contained finger-follow drag. Wraps the view and
+/// manages its own offset (no interpreted-state binding); springs back on
+/// release. A plain View wrapper to avoid the name clash with Kiln's own
+/// `ViewModifier` enum.
+struct KilnDragToMove<Wrapped: View>: View {
+    let wrapped: Wrapped
+    @State private var offset: CGSize = .zero
+    @GestureState private var drag: CGSize = .zero
+
+    var body: some View {
+        wrapped
+            .offset(x: offset.width + drag.width, y: offset.height + drag.height)
+            .gesture(
+                DragGesture()
+                    .updating($drag) { value, state, _ in state = value.translation }
+                    .onEnded { _ in
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                            offset = .zero   // spring back to origin
+                        }
+                    }
+            )
     }
 }

@@ -1882,6 +1882,11 @@ public final class SwiftParser {
         case "Divider":
             return .divider
 
+        case "BarChart", "LineChart":
+            // Convenience charts: BarChart(data) / LineChart(data).
+            let data = arguments.first?.value ?? .arrayLiteral([])
+            return .chart(kind: name == "LineChart" ? .line : .bar, data: data)
+
         case "ForEach":
             // Parse range argument: ForEach(0..<5) or ForEach(1...10)
             if let firstArg = arguments.first?.value {
@@ -2694,6 +2699,9 @@ public final class SwiftParser {
 
         case "clipped":
             return .clipped
+
+        case "dragToMove":
+            return .dragToMove
 
         case "overlay":
             // .overlay(content) with explicit argument
