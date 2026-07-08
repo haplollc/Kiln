@@ -41,8 +41,23 @@ public final class SwiftRunner: ObservableObject {
     
     private init() {}
     
-    /// Run Swift code and return the result
-    public func run(_ code: String) -> RunResult {
+    /// The outcome of `prepare(_:)`: either a ready-to-render view (with its
+    /// interpreter state + AST for a validation probe) or a parse-time failure.
+    struct Prepared {
+        var cleanAST: ViewNode?
+        var state: SwiftRunnerState?
+        var consoleOutput: String
+        var errors: [String]
+        var hasView: Bool
+    }
+
+    /// Everything `run(_:)` does UP TO (but not including) building the SwiftUI
+    /// view — tokenize → parse → dedup → separateState → stripEmpty → state init
+    /// → registerDeclarations. Split out so `Kiln.validate` can get at the AST
+    /// and the interpreter state (which `run` otherwise hides inside the AnyView)
+    /// to eagerly evaluate the body and invoke handlers. Also updates the
+    /// published diagnostics so `run` behaves exactly as before.
+    func prepare(_ code: String) -> Prepared {
         consoleOutput = ""
         errors = []
         hasView = false
@@ -54,71 +69,31 @@ public final class SwiftRunner: ObservableObject {
         // re-fired .onAppear when a tab toggles) still return cached data.
         SwiftRunnerState.clearFetchCache()
 
-        KilnLog.d("[SwiftRunner] run() called with code (\(code.count) chars):")
-        KilnLog.d("[SwiftRunner] ---BEGIN CODE---")
-        KilnLog.d(code)
-        KilnLog.d("[SwiftRunner] ---END CODE---")
-
         do {
-            // Tokenize
             let lexer = SwiftLexer(source: code)
             let tokens = try lexer.tokenize()
-            KilnLog.d("[SwiftRunner] Lexer produced \(tokens.count) tokens")
-            for (i, tok) in tokens.enumerated() {
-                KilnLog.d("[SwiftRunner]   token[\(i)] = \(tok) (line \(tok.line))")
-            }
 
-            // Parse
             var ast = try parser.parse(tokens)
             lastAST = ast
-
-            // Deduplicate: when a #Preview calls a custom struct, the struct body
-            // appears twice (once from struct parsing, once from preview instantiation).
-            // Keep only the last view-producing statement (the preview result).
             ast = deduplicatePreview(ast, parsedStructs: parser.parsedStructs)
             dedupedASTForTesting = ast
 
-            KilnLog.d("[SwiftRunner] Parser produced AST: \(ast)")
-
-            // Evaluate expressions and collect print output
             var output = ""
             evaluateForConsole(ast, output: &output)
             consoleOutput = output
 
-            // Separate state variable declarations from view content
             let (stateVars, viewAST) = separateState(ast)
-            KilnLog.d("[SwiftRunner] State vars: \(stateVars)")
-            KilnLog.d("[SwiftRunner] View AST: \(viewAST)")
-
-            // Strip .empty from top-level AST
             let cleanAST = stripEmpty(viewAST)
             cleanASTForTesting = cleanAST
-            KilnLog.d("[SwiftRunner] Clean AST: \(cleanAST)")
 
-            // Check if the AST represents a view
-            let isView = isViewNode(cleanAST)
-            KilnLog.d("[SwiftRunner] isViewNode = \(isView)")
-
-            if isView {
+            if isViewNode(cleanAST) {
                 hasView = true
                 let state = SwiftRunnerState(stateVars)
-                // Plan 2: hoist any user-defined functions, enum static funcs,
-                // and extension methods from the original AST into the state's
-                // function table so call sites like `BookService.search(...)` and
-                // `load()` can dispatch at runtime.
                 registerDeclarations(ast, state: state)
-                // Plan 5 capstone: propagate struct field-type schemas so
-                // JSONDecoder can deep-tag nested decoded values with `_type`
-                // and computed properties dispatch on inner elements too.
                 state.typeSchemas = parser.parsedSchemas
-                let view = AnyView(DynamicView(ast: cleanAST, state: state))
-                KilnLog.d("[SwiftRunner] View built with state: \(stateVars)")
-                return RunResult(view: view, consoleOutput: output, errors: [])
+                return Prepared(cleanAST: cleanAST, state: state, consoleOutput: output,
+                                errors: [], hasView: true)
             } else {
-                KilnLog.d("[SwiftRunner] AST is NOT a view node — returning nil view")
-                // Don't fail silently: explain WHY no view came out so the caller
-                // (and a code-gen model) can fix it instead of seeing a bare
-                // "no view produced".
                 let viewStructs = parser.parsedStructs.keys.sorted()
                 let msg: String
                 if !viewStructs.isEmpty {
@@ -127,27 +102,57 @@ public final class SwiftRunner: ObservableObject {
                     msg = "No SwiftUI view found. The entry file must itself be a complete `struct ContentView: View { var body: some View { … } }` with the whole program inside it — not a comment, a stub, or a reference such as `\\(ContentView())`."
                 }
                 errors = [msg]
-                return RunResult(view: nil, consoleOutput: output, errors: [msg])
+                return Prepared(cleanAST: cleanAST, state: nil, consoleOutput: output,
+                                errors: [msg], hasView: false)
             }
-
         } catch let error as LexerError {
             let msg = formatError(error.localizedDescription, line: error.line, sourceCode: code)
-            KilnLog.d("[SwiftRunner] LexerError: \(msg)")
             errors = [msg]
-            return RunResult(view: nil, consoleOutput: "", errors: [msg])
-
+            return Prepared(cleanAST: nil, state: nil, consoleOutput: "", errors: [msg], hasView: false)
         } catch let error as ParserError {
             let msg = formatError(error.localizedDescription, line: error.line, sourceCode: code)
-            KilnLog.d("[SwiftRunner] ParserError: \(msg)")
             errors = [msg]
-            return RunResult(view: nil, consoleOutput: "", errors: [msg])
-
+            return Prepared(cleanAST: nil, state: nil, consoleOutput: "", errors: [msg], hasView: false)
         } catch {
             let msg = error.localizedDescription
-            KilnLog.d("[SwiftRunner] Unknown error: \(msg)")
             errors = [msg]
-            return RunResult(view: nil, consoleOutput: "", errors: [msg])
+            return Prepared(cleanAST: nil, state: nil, consoleOutput: "", errors: [msg], hasView: false)
         }
+    }
+
+    /// Run Swift code and return the result
+    public func run(_ code: String) -> RunResult {
+        let prepared = prepare(code)
+        guard prepared.hasView, let cleanAST = prepared.cleanAST, let state = prepared.state else {
+            return RunResult(view: nil, consoleOutput: prepared.consoleOutput, errors: prepared.errors)
+        }
+        let view = AnyView(DynamicView(ast: cleanAST, state: state))
+        return RunResult(view: view, consoleOutput: prepared.consoleOutput, errors: [])
+    }
+
+    // MARK: - Validation probe
+
+    /// Headlessly exercise `code` the way a real render + a burst of user input
+    /// would, WITHOUT mounting a live SwiftUI view — used by `Kiln.validate`.
+    /// Returns the parse errors plus any runtime problems the interpreter hit
+    /// while evaluating the body and firing action handlers, and whether the
+    /// view produced any visible content. Never hangs: the interpreter runs on a
+    /// bounded fuel budget (infinite loops become a reported error).
+    func probe(_ code: String, ticks: Int, fuel: Int) -> KilnValidation {
+        let prepared = prepare(code)
+        guard prepared.hasView, let cleanAST = prepared.cleanAST, let state = prepared.state else {
+            return KilnValidation(errors: prepared.errors, warnings: [],
+                                  renderedContent: false, hasView: false)
+        }
+
+        state.armFuel(fuel)
+        let renderedContent = KilnProbe.exercise(ast: cleanAST, state: state, ticks: ticks)
+
+        return KilnValidation(
+            errors: prepared.errors + state.runtimeErrors,
+            warnings: state.runtimeWarnings,
+            renderedContent: renderedContent,
+            hasView: true)
     }
 
     /// Separate state variable declarations from view content.

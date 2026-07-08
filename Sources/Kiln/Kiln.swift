@@ -57,6 +57,29 @@ public enum Kiln {
         )
     }
 
+    /// Validate Swift source the way a real render + a burst of user input would,
+    /// WITHOUT mounting a live SwiftUI view. Unlike `run`, which only constructs
+    /// a lazy view wrapper (so render-time crashes, blank screens, and throwing
+    /// handlers all look like success), `validate` eagerly evaluates the view
+    /// body — running helper functions and firing lifecycle + interaction
+    /// handlers (onAppear, onTapGesture, onTick, onSwipe, Button actions) — and
+    /// reports the runtime problems it hits plus whether anything actually
+    /// rendered.
+    ///
+    /// - Parameters:
+    ///   - code: the Swift/SwiftUI source (must define `struct ContentView`).
+    ///   - ticks: how many times to fire each `.onTick` handler (drives a few
+    ///     frames of any game loop so animation/collision bugs surface). Default 8.
+    ///   - fuel: max interpreted steps before the run is aborted as a runaway
+    ///     loop. Default 2,000,000 — ample for real phone UI/games, but bounded
+    ///     so an infinite loop becomes a reported error instead of a hang.
+    /// - Returns: a `KilnValidation` with parse + runtime errors, soft warnings,
+    ///   and whether visible content was produced.
+    @MainActor
+    public static func validate(_ code: String, ticks: Int = 8, fuel: Int = 2_000_000) -> KilnValidation {
+        SwiftRunner.shared.probe(code, ticks: ticks, fuel: fuel)
+    }
+
     /// Convenience flag: returns the latest known version of the Kiln
     /// public API. Bumped on breaking changes.
     public static let version: String = "0.1.0"
@@ -135,6 +158,40 @@ public enum KilnValue: Equatable, Sendable {
         case .object(let o): return .object(o.mapValues(toInternal))
         case .null: return .nil
         }
+    }
+}
+
+// MARK: - Validation result
+
+/// The outcome of `Kiln.validate(_:)` — a deeper check than `KilnResult` that
+/// reflects what actually happened when the view body was evaluated and its
+/// handlers fired, not just whether the source parsed.
+public struct KilnValidation {
+    /// Hard failures: parse errors, plus runtime errors hit while evaluating the
+    /// body / firing handlers (undefined function, runaway loop, thrown error).
+    public let errors: [String]
+
+    /// Soft problems that don't necessarily break the app but usually indicate a
+    /// bug (undefined variable read, missing object key). Surfaced separately so
+    /// a caller can choose whether to treat them as blocking.
+    public let warnings: [String]
+
+    /// Whether the probe produced any visible content (drawn shapes, text,
+    /// controls). `false` means a blank screen even though the source parsed.
+    public let renderedContent: Bool
+
+    /// Whether a `ContentView` view was produced at all (parse-level success).
+    public let hasView: Bool
+
+    /// The app is considered good when it produced a view, rendered visible
+    /// content, and hit no hard errors.
+    public var isValid: Bool { hasView && renderedContent && errors.isEmpty }
+
+    public init(errors: [String], warnings: [String], renderedContent: Bool, hasView: Bool) {
+        self.errors = errors
+        self.warnings = warnings
+        self.renderedContent = renderedContent
+        self.hasView = hasView
     }
 }
 

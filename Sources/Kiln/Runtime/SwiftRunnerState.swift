@@ -30,9 +30,67 @@ public final class SwiftRunnerState: ObservableObject {
     /// when this returns.
     public func runAction(_ node: ViewNode) {
         actionDepth += 1
-        defer { actionDepth -= 1 }
+        defer { actionDepth -= 1; loopControl = nil }
         execute(node)
     }
+
+    // MARK: - Runtime diagnostics & execution budget
+
+    /// Runtime problems detected while interpreting (unknown functions, thrown
+    /// errors, out-of-range subscripts, exhausted execution budget, …). Live
+    /// rendering stays as forgiving as before — these are observability, not
+    /// behavior — but `Kiln.validate` reads them to tell a coding agent exactly
+    /// what broke instead of silently rendering blank.
+    /// Hard failures land in `runtimeErrors`; likely-but-not-certain problems
+    /// (undefined variable, missing object key) land in `runtimeWarnings`.
+    public private(set) var runtimeErrors: [String] = []
+    public private(set) var runtimeWarnings: [String] = []
+    private var seenIssues: Set<String> = []
+
+    /// Record a runtime problem (deduped, capped so a hot loop can't flood).
+    func reportError(_ message: String) { report(message, into: &runtimeErrors) }
+    func reportWarning(_ message: String) { report(message, into: &runtimeWarnings) }
+    private func report(_ message: String, into list: inout [String]) {
+        guard list.count < 40 else { return }
+        let msg = String(message.prefix(300))
+        guard seenIssues.insert(msg).inserted else { return }
+        list.append(msg)
+        KilnLog.d("[SR] issue: \(msg)")
+    }
+
+    /// Execution budget ("fuel"). Each interpreted statement/expression consumes
+    /// one unit; when it runs out the interpreter unwinds via `fuelExhausted`
+    /// (evaluate → .nil, execute → return) instead of hanging the main thread.
+    /// Unlimited by default so live apps behave exactly as before; the
+    /// validation probe arms it to convert infinite loops into reported errors.
+    private var fuel: Int = .max
+    public private(set) var fuelExhausted = false
+    private var callDepth = 0
+
+    /// Arm the execution budget (nil = unlimited) and clear the exhausted flag.
+    public func armFuel(_ budget: Int?) {
+        fuel = budget ?? .max
+        fuelExhausted = false
+    }
+
+    @inline(__always)
+    private func consumeFuel() -> Bool {
+        if fuelExhausted { return false }
+        guard fuel != .max else { return true }
+        fuel -= 1
+        if fuel <= 0 {
+            fuelExhausted = true
+            reportError("execution budget exhausted — this looks like an infinite loop or runaway work. Bound every loop, and step games with .onTick (a few steps per second), not unbounded iteration.")
+            return false
+        }
+        return true
+    }
+
+    /// `break` / `continue` unwind for interpreted loops. Set by execute on a
+    /// `.breakStmt`/`.continueStmt`, consumed by the innermost running loop;
+    /// block execution stops early while it is pending.
+    enum LoopControl { case breakLoop, continueLoop }
+    private var loopControl: LoopControl?
 
     /// Bind a for-loop variable to the current item. Handles tuple-destructuring
     /// patterns (`for (x, y) in pairs` → variable is "x,y"): the item is an array
@@ -101,20 +159,7 @@ public final class SwiftRunnerState: ObservableObject {
 
     public init(_ initial: [String: Value] = [:]) {
         self.variables = initial
-        Swift.print("INIT_VARS keys=\(initial.keys.sorted()) snake=\(initial["snake"] ?? .nil) cells=\(String(describing: initial["cells"]).prefix(60))")
-        // Build banner — if you don't see this in the console when the view
-        // renders, your app is running a STALE Kuzco build. Clean DerivedData,
-        // reset Swift Package caches, and rebuild.
-        Self.printBuildBannerOnce()
-    }
-
-    private nonisolated(unsafe) static var bannerPrinted = false
-    nonisolated private static func printBuildBannerOnce() {
-        guard !bannerPrinted else { return }
-        bannerPrinted = true
-        let line = "[SR] Kuzco/SwiftRunner build: 2026-05-05-navlink-eager-bake — rebuild Kuzco if you don't see this"
-        Swift.print(line)
-        NSLog("%@", line)
+        KilnLog.d("INIT_VARS keys=\(initial.keys.sorted())")
     }
 
     /// Register a function declaration under `name`, or scoped under `owner.name`
@@ -123,7 +168,7 @@ public final class SwiftRunnerState: ObservableObject {
         guard case .functionDecl(let name, _, _, _, _) = decl else { return }
         let key = owner.map { "\($0).\(name)" } ?? name
         functions[key] = decl
-        print("[State] registered func '\(key)'")
+        KilnLog.d("[State] registered func '\(key)'")
     }
 
     /// Walk a just-parsed `.enumDeclaration` / `.extensionDeclaration` and hoist
@@ -140,10 +185,21 @@ public final class SwiftRunnerState: ObservableObject {
     private func callUserFunction(key: String, arguments: [Argument]) -> Value {
         guard let decl = functions[key],
               case .functionDecl(_, let params, let body, _, _) = decl else {
-            print("[SR] callUserFunction: '\(key)' NOT FOUND in function table")
+            reportError("function '\(key)' is not defined")
             return .nil
         }
-        print("[SR] callUserFunction: enter '\(key)' with \(arguments.count) arg(s)")
+        guard callDepth < 64 else {
+            reportError("call depth exceeded 64 in '\(key)' — runaway recursion; rewrite without deep recursion")
+            return .nil
+        }
+        callDepth += 1
+        // A function body is its own control scope: a caller's pending
+        // break/continue must not skip the body, and a break/continue inside the
+        // body must not leak back to the caller's loop. Save + reset + restore.
+        let savedControl = loopControl
+        loopControl = nil
+        defer { callDepth -= 1; loopControl = savedControl }
+        KilnLog.d("[SR] callUserFunction: enter '\(key)' with \(arguments.count) arg(s)")
 
         // Bind parameters. Save prior values so the call is a local scope for
         // parameter names; other variable writes during the call persist to the
@@ -183,7 +239,7 @@ public final class SwiftRunnerState: ObservableObject {
         } catch let signal as ReturnSignal {
             result = signal.value
         } catch {
-            print("[State] user-function '\(key)' threw: \(error)")
+            reportError("runtime error in '\(key)': \(error)")
         }
 
         // Run defers in LIFO order — guaranteed to execute even on early return
@@ -192,7 +248,7 @@ public final class SwiftRunnerState: ObservableObject {
         // cleanup uses the values at exit, not at registration).
         let defers = deferFrames.removeLast()
         for body in defers.reversed() {
-            print("[State] running deferred block for '\(key)'")
+            KilnLog.d("[State] running deferred block for '\(key)'")
             execute(body)
         }
 
@@ -204,7 +260,7 @@ public final class SwiftRunnerState: ObservableObject {
                 variables.removeValue(forKey: name)
             }
         }
-        print("[SR] callUserFunction: exit '\(key)' returning: \(result.description.prefix(150))")
+        KilnLog.d("[SR] callUserFunction: exit '\(key)' returning: \(result.description.prefix(150))")
         return result
     }
 
@@ -260,9 +316,13 @@ public final class SwiftRunnerState: ObservableObject {
     }
 
     private func executeWithReturnAsync(_ node: ViewNode) async throws {
+        guard consumeFuel() else { return }
         switch node {
         case .block(let stmts):
-            for s in stmts { try await executeWithReturnAsync(s) }
+            for s in stmts {
+                try await executeWithReturnAsync(s)
+                if fuelExhausted { break }
+            }
         case .returnStmt(let expr):
             let value: Value
             if let expr = expr { value = await evaluateAsync(expr) } else { value = .nil }
@@ -320,6 +380,7 @@ public final class SwiftRunnerState: ObservableObject {
     }
 
     private func evaluateAsync(_ node: ViewNode) async -> Value {
+        guard consumeFuel() else { return .nil }
         switch node {
         case .methodCall(let obj, let method, let args):
             // Type-prefixed user-function dispatch first (e.g. BookService.search).
@@ -517,9 +578,18 @@ public final class SwiftRunnerState: ObservableObject {
 
     /// Execute a node with return-signal propagation. Used inside user-function bodies.
     private func executeWithReturn(_ node: ViewNode) throws {
+        guard consumeFuel() else { return }
+        if loopControl != nil { return }
         switch node {
+        case .variable("break"):
+            loopControl = .breakLoop
+        case .variable("continue"):
+            loopControl = .continueLoop
         case .block(let stmts):
-            for s in stmts { try executeWithReturn(s) }
+            for s in stmts {
+                try executeWithReturn(s)
+                if loopControl != nil || fuelExhausted { break }
+            }
         case .returnStmt(let expr):
             let value = expr.map { evaluate($0) } ?? .nil
             throw ReturnSignal(value: value)
@@ -555,8 +625,13 @@ public final class SwiftRunnerState: ObservableObject {
             // `func cells() { for c in landed { … } }`) writes the non-published
             // store and can't trigger the re-render loop.
             for item in iterationValues(for: collection) {
+                if fuelExhausted { break }
                 bindLoopVariable(variable, item)
                 try executeWithReturn(body)
+                if let ctrl = loopControl {
+                    loopControl = nil
+                    if ctrl == .breakLoop { break }
+                }
             }
         default:
             execute(node)
@@ -572,8 +647,18 @@ public final class SwiftRunnerState: ObservableObject {
     }
 
     public func execute(_ action: ViewNode) {
-        print("[State] execute: \(action)")
+        guard consumeFuel() else { return }
+        if loopControl != nil { return }   // a pending break/continue halts further statements
+        KilnLog.d("[State] execute: \(action)")
         switch action {
+        // `break` / `continue` parse as bare identifier reads (they aren't Kiln
+        // keywords). As standalone statements inside a loop body they carry their
+        // real Swift meaning: flag the innermost loop to stop / skip. Without this
+        // a `for` loop could never be exited early — a real hang risk.
+        case .variable("break"):
+            loopControl = .breakLoop
+        case .variable("continue"):
+            loopControl = .continueLoop
         case .compoundAssignment(let variable, let op, let valueNode):
             let current = renderVariables[variable] ?? variables[variable] ?? .nil
             let newValue = evaluate(valueNode)
@@ -604,6 +689,7 @@ public final class SwiftRunnerState: ObservableObject {
         case .block(let statements):
             for stmt in statements {
                 execute(stmt)
+                if loopControl != nil || fuelExhausted { break }
             }
 
         // `if`/`else` inside an action block (e.g. a Button action, .onTick or
@@ -622,8 +708,13 @@ public final class SwiftRunnerState: ObservableObject {
         // iteration; the body executes with it in scope.
         case .forInLoop(let variable, let collection, let body):
             for item in iterationValues(for: collection) {
+                if fuelExhausted { break }
                 bindLoopVariable(variable, item)
                 execute(body)
+                if let ctrl = loopControl {
+                    loopControl = nil
+                    if ctrl == .breakLoop { break }   // continue: fall through to next item
+                }
             }
 
         // Handle assignment to expression (e.g., requirements[0].isMet = value)
@@ -758,6 +849,7 @@ public final class SwiftRunnerState: ObservableObject {
 
     /// Evaluate a ViewNode expression using current state values
     public func evaluate(_ node: ViewNode) -> Value {
+        guard consumeFuel() else { return .nil }
         switch node {
         case .variable(let name):
             if let v = renderVariables[name] ?? variables[name] { return v }
@@ -767,6 +859,10 @@ public final class SwiftRunnerState: ObservableObject {
             if let key = functions.keys.first(where: { $0 == name || $0.hasSuffix(".\(name)") }),
                case .functionDecl(_, let params, _, _, _)? = functions[key], params.isEmpty {
                 return callUserFunction(key: key, arguments: [])
+            }
+            // `break`/`continue` legitimately reach here as bare reads; don't warn.
+            if name != "break" && name != "continue" {
+                reportWarning("'\(name)' is used but never defined (declare it with @State/var/let, or check the spelling)")
             }
             return .nil
         case .literal(let lit):
@@ -1320,6 +1416,15 @@ public final class SwiftRunnerState: ObservableObject {
             if case .number(let l) = evaluate(lo), case .number(let h) = evaluate(hi) {
                 let upper = op == .less ? Int(h) - 1 : Int(h)
                 guard Int(l) <= upper else { return [] }
+                // Cap materialization so `for i in 0..<10_000_000` can't allocate a
+                // giant array and freeze the main thread before per-iteration fuel
+                // even fires. 200k rows is far beyond any real on-phone UI/game.
+                let count = upper - Int(l) + 1
+                if count > 200_000 {
+                    reportError("range 0..<\(upper + 1) has \(count) iterations — far too many for a phone UI. Loop over a small fixed count.")
+                    fuelExhausted = fuel != .max ? true : fuelExhausted
+                    return []
+                }
                 return (Int(l)...upper).map { .number(Double($0)) }
             }
             return []
@@ -1704,6 +1809,11 @@ public final class SwiftRunnerState: ObservableObject {
     ///    otherwise the last expression's value is the implicit return.
     private func evaluateClosureBody(_ body: ViewNode) -> Value {
         if case .block = body {
+            // Closure body is its own control scope (like a function) — don't let
+            // a caller's pending break/continue skip it, nor leak one out.
+            let savedControl = loopControl
+            loopControl = nil
+            defer { loopControl = savedControl }
             do {
                 try executeWithReturn(body)
                 return implicitReturnValue(body)
@@ -1965,18 +2075,13 @@ public final class SwiftRunnerState: ObservableObject {
                 var dict: [String: Value] = [:]
                 for arg in arguments {
                     if let label = arg.label {
-                        let v = evaluate(arg.value)
-                        dict[label] = v
-                        if name == "Book" {
-                            print("[SR] Book(\(label):) ← \(v.description.prefix(80))")
-                        }
+                        dict[label] = evaluate(arg.value)
                     }
-                }
-                if name == "Book" {
-                    print("[SR] Book constructor returning: \(Value.object(dict).description.prefix(120))")
                 }
                 return .object(dict)
             }
+            // Unknown bare call — not a user func, native bridge, or built-in.
+            reportWarning("function '\(name)' is not defined or supported (check the spelling, or use a value from Kiln's supported subset)")
         }
         return .nil
     }
