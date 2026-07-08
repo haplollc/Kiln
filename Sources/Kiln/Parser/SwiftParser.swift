@@ -66,8 +66,12 @@ public final class SwiftParser {
     public func parse(_ tokens: [Token]) throws -> ViewNode {
         self.tokens = tokens
         self.current = 0
+        // Reset per-parse state so a reused parser (SwiftRunner.shared) doesn't
+        // carry structs/schemas from a previous run into this one.
+        self.parsedStructs = [:]
+        self.parsedSchemas = [:]
 
-        print("[SwiftParser] parse() called with \(tokens.count) tokens")
+        KilnLog.d("[SwiftParser] parse() called with \(tokens.count) tokens")
 
         var statements: [ViewNode] = []
 
@@ -75,7 +79,7 @@ public final class SwiftParser {
             skipNewlines()
             if !isAtEnd {
                 let node = try parseStatement()
-                print("[SwiftParser] parseStatement() returned: \(node)")
+                KilnLog.d("[SwiftParser] parseStatement() returned: \(node)")
                 if case .empty = node {
                     continue
                 }
@@ -96,7 +100,7 @@ public final class SwiftParser {
         // collected, walk the AST and inline any `.functionCall` whose name
         // matches a registered struct.
         let result = resolveForwardStructReferences(preResolve)
-        print("[SwiftParser] Final AST: \(result)")
+        KilnLog.d("[SwiftParser] Final AST: \(result)")
         return result
     }
 
@@ -378,6 +382,12 @@ public final class SwiftParser {
         // if/else conditional view
         if check(.keyword(.if)) {
             return try parseIfElse()
+        }
+
+        // Statement-level for-in loop: `for x in collection { ... }`. Distinct
+        // from `ForEach(...)` (a view) — this runs in action/func bodies.
+        if check(.keyword(.for)) {
+            return try parseForInLoop()
         }
 
         // Expression statement
@@ -749,7 +759,7 @@ public final class SwiftParser {
             structName = name
             _ = advance()
         }
-        print("[SwiftParser] Parsing struct '\(structName)'")
+        KilnLog.d("[SwiftParser] Parsing struct '\(structName)'")
 
         // Read protocol conformance (`: View`, `: PreviewProvider`, etc.)
         var isPreviewProvider = false
@@ -766,7 +776,7 @@ public final class SwiftParser {
 
         // Skip PreviewProvider structs entirely — they're Xcode metadata, not renderable
         if isPreviewProvider {
-            print("[SwiftParser] Skipping PreviewProvider struct '\(structName)'")
+            KilnLog.d("[SwiftParser] Skipping PreviewProvider struct '\(structName)'")
             if check(.leftBrace) {
                 _ = advance()
                 var depth = 1
@@ -827,7 +837,7 @@ public final class SwiftParser {
 
                 if case .identifier(let propName) = peek().type,
                    propName == "body" || propName == "previews" {
-                    print("[SwiftParser] Found '\(propName)' property in struct '\(structName)'")
+                    KilnLog.d("[SwiftParser] Found '\(propName)' property in struct '\(structName)'")
                     _ = advance() // consume property name
 
                     // Skip type annotation `: some View`
@@ -843,14 +853,14 @@ public final class SwiftParser {
                         _ = advance() // consume {
                         skipNewlines()
                         bodyView = try parseClosureBody()
-                        print("[SwiftParser] Parsed body view: \(bodyView as Any)")
+                        KilnLog.d("[SwiftParser] Parsed body view: \(bodyView as Any)")
                         skipNewlines()
                         if check(.rightBrace) {
                             _ = advance() // consume } of computed property
                         }
                         continue
                     } else {
-                        print("[SwiftParser] WARNING: Expected '{' after type annotation, got \(peek())")
+                        KilnLog.d("[SwiftParser] WARNING: Expected '{' after type annotation, got \(peek())")
                     }
                 } else if case .identifier(let propName) = peek().type {
                     // Non-body property (e.g. @State private var count = 0)
@@ -899,7 +909,7 @@ public final class SwiftParser {
                         if let value = try? parseExpression() {
                             let assignment = ViewNode.assignment(name: propName, isVar: isVar, value: value)
                             stateProperties.append(assignment)
-                            print("[SwiftParser] Collected state property '\(propName)' = \(value)")
+                            KilnLog.d("[SwiftParser] Collected state property '\(propName)' = \(value)")
                             continue
                         }
                     }
@@ -908,7 +918,7 @@ public final class SwiftParser {
                     if !isVar {
                         // `let` property without default = init parameter
                         stateProperties.append(.assignment(name: propName, isVar: false, value: .literal(.nil)))
-                        print("[SwiftParser] Collected init param '\(propName)' (no default)")
+                        KilnLog.d("[SwiftParser] Collected init param '\(propName)' (no default)")
                         continue
                     }
                     // `var prop: T?` (or any optional `var` without `=`) — Swift
@@ -916,7 +926,7 @@ public final class SwiftParser {
                     // bare reads see `.nil` rather than dropping the property
                     // entirely (which would surface as undefined-name reads).
                     stateProperties.append(.assignment(name: propName, isVar: true, value: .literal(.nil)))
-                    print("[SwiftParser] Collected optional state property '\(propName)' = nil (no initializer)")
+                    KilnLog.d("[SwiftParser] Collected optional state property '\(propName)' = nil (no initializer)")
                     continue
                 } else {
                     // Not body/previews and not a named property — restore position and skip
@@ -952,7 +962,7 @@ public final class SwiftParser {
         }
 
         if bodyView == nil {
-            print("[SwiftParser] WARNING: No body/previews found in struct '\(structName)'")
+            KilnLog.d("[SwiftParser] WARNING: No body/previews found in struct '\(structName)'")
         }
 
         // Store this struct for custom view support.
@@ -977,7 +987,7 @@ public final class SwiftParser {
             }
             let storedBody: ViewNode = stateInits.isEmpty ? body : .block(stateInits + [body])
             parsedStructs[structName] = ParsedStruct(properties: initProps, body: storedBody)
-            print("[SwiftParser] Stored struct '\(structName)' with \(initProps.count) init params: \(initProps), \(stateInits.count) state inits")
+            KilnLog.d("[SwiftParser] Stored struct '\(structName)' with \(initProps.count) init params: \(initProps), \(stateInits.count) state inits")
         }
 
         // Plan 5: emit an extensionDeclaration-shaped node so SwiftRunner's
@@ -994,7 +1004,7 @@ public final class SwiftParser {
         let result: ViewNode
         if !stateProperties.isEmpty, let body = bodyView {
             result = .block(prelude + stateProperties + [body])
-            print("[SwiftParser] parseStructDeclaration returning block with \(stateProperties.count) state properties + body view + \(memberFuncs.count) methods")
+            KilnLog.d("[SwiftParser] parseStructDeclaration returning block with \(stateProperties.count) state properties + body view + \(memberFuncs.count) methods")
         } else if !prelude.isEmpty && bodyView == nil {
             // e.g. a ViewModifier struct — no body view, just methods.
             result = prelude.count == 1 ? prelude[0] : .block(prelude)
@@ -1003,7 +1013,7 @@ public final class SwiftParser {
         } else {
             result = bodyView ?? .empty
         }
-        print("[SwiftParser] parseStructDeclaration returning: \(result)")
+        KilnLog.d("[SwiftParser] parseStructDeclaration returning: \(result)")
         return result
     }
 
@@ -1386,25 +1396,12 @@ public final class SwiftParser {
                         _ = advance() // (
                         if check(.rightParen) { _ = advance() } // )
                         expr = .compoundAssignment(variable: varName, op: .toggle, value: .empty)
-                    // Special case: .append(value) on a variable → string/array concatenation
-                    } else if name == "append", case .variable(let varName) = expr {
-                        _ = advance() // (
-                        var appendArgs: [Argument] = []
-                        if !check(.rightParen) {
-                            repeat {
-                                skipNewlines()
-                                appendArgs.append(try parseArgument())
-                                skipNewlines()
-                            } while match(.comma)
-                        }
-                        if check(.rightParen) { _ = advance() } // )
-                        let appendValue = appendArgs.first?.value ?? .literal(.string(""))
-                        expr = .compoundAssignment(variable: varName, op: .plusAssign, value: appendValue)
-                    // Special case: .removeAll() on a variable → reset to empty
-                    } else if name == "removeAll", case .variable(let varName) = expr {
-                        _ = advance() // (
-                        if check(.rightParen) { _ = advance() } // )
-                        expr = .compoundAssignment(variable: varName, op: .assign, value: .literal(.string("")))
+                    // NOTE: `.append(...)` and `.removeAll()` are intentionally NOT
+                    // desugared here — they route to the generic `.methodCall` path
+                    // below, where `SwiftRunnerState.execute` mutates arrays (and
+                    // strings) in place correctly. The old desugar turned
+                    // `arr.append(x)` into `arr += x`, which string-concatenated the
+                    // array's description instead of appending an element.
                     } else {
                         // parseModifierOrMethodArgs consumes `( ... )` and returns both
                         // the captured arguments and an optional ViewModifier. If the
@@ -1416,11 +1413,15 @@ public final class SwiftParser {
                         } else {
                             switch expr {
                             case .variable, .propertyAccess, .subscriptAccess, .binding,
-                                 .methodCall, .functionCall:
+                                 .methodCall, .functionCall,
+                                 .literal, .stringInterpolation, .arrayLiteral, .ternary:
+                                // Includes literal receivers so `"a,b".split(...)`,
+                                // `"x".uppercased()`, `[1,2].count` etc. work — not
+                                // just methods on variables.
                                 expr = .methodCall(object: expr, method: name, arguments: callArgs)
                             default:
                                 // It's a view — just skip the unrecognized modifier.
-                                print("[SwiftParser] Unknown modifier '.\(name)' — skipping")
+                                KilnLog.d("[SwiftParser] Unknown modifier '.\(name)' — skipping")
                             }
                         }
                     }
@@ -1599,6 +1600,27 @@ public final class SwiftParser {
             
         case .leftParen:
             _ = advance()
+            // Labeled tuple: `(x: 150, y: 300)` → store as an object {x:150, y:300}
+            // so `pt.x` / `pt.x += 1` read & mutate through the object machinery.
+            // Models reach for labeled tuples constantly for points/pairs.
+            if case .identifier = peek().type, checkNext(.colon) {
+                var pairs: [ViewNode] = []
+                while case .identifier(let label) = peek().type, checkNext(.colon) {
+                    _ = advance(); _ = advance() // label, colon
+                    skipNewlines()
+                    let v = try parseExpression()
+                    skipNewlines()
+                    pairs.append(.arrayLiteral([.literal(.string(label)), v]))
+                    if !match(.comma) { break }
+                    skipNewlines()
+                }
+                guard check(.rightParen) else {
+                    throw ParserError.unexpectedToken(peek(), expected: "')'",
+                        hint: "missing closing parenthesis for labeled tuple")
+                }
+                _ = advance()
+                return .functionCall(name: "_dictLiteral", arguments: [Argument(label: nil, value: .arrayLiteral(pairs))])
+            }
             let expr = try parseExpression()
             // Check for tuple: (expr, expr, ...)
             if check(.comma) {
@@ -1623,7 +1645,8 @@ public final class SwiftParser {
 
         case .leftBracket:
             // Array literal `[a, b, c]` OR dictionary literal `[k: v, k2: v2]`
-            // OR empty-dict marker `[:]`. Trailing commas allowed.
+            // OR empty-dict marker `[:]`. Trailing commas allowed. Elements may be
+            // spreads (`[a, ...others, b]`) — see parseArrayElement.
             _ = advance() // consume [
             skipNewlines()
 
@@ -1645,7 +1668,7 @@ public final class SwiftParser {
             }
 
             // Parse first element/key.
-            let first = try parseExpression()
+            let first = try parseArrayElement()
             skipNewlines()
 
             // Dictionary literal: first was followed by `:` → treat as key.
@@ -1686,7 +1709,7 @@ public final class SwiftParser {
                 _ = advance()
                 skipNewlines()
                 if check(.rightBracket) { break }
-                elements.append(try parseExpression())
+                elements.append(try parseArrayElement())
                 skipNewlines()
             }
             guard check(.rightBracket) else {
@@ -1709,8 +1732,13 @@ public final class SwiftParser {
                     hint: "missing closing brace for inline closure")
             }
             _ = advance() // consume }
-            // Action closures don't produce UI — return the body as-is
-            // (it will be .empty or a block of non-view expressions)
+            // If the closure named a parameter (`{ seg in … }`), wrap it so
+            // callers like `map`/`filter`/`compactMap` can bind that name — not
+            // just `$0`. Parameter-less action closures (`{ count += 1 }`) return
+            // the body as-is (unchanged behavior).
+            if let param = lastClosureParam {
+                return .closure(parameters: [param], body: body)
+            }
             return body
 
         case .dot:
@@ -1886,6 +1914,11 @@ public final class SwiftParser {
             // Convenience charts: BarChart(data) / LineChart(data).
             let data = arguments.first?.value ?? .arrayLiteral([])
             return .chart(kind: name == "LineChart" ? .line : .bar, data: data)
+
+        case "GameCanvas":
+            // Real-time drawing surface: GameCanvas(shapes).
+            let shapes = arguments.first?.value ?? .arrayLiteral([])
+            return .gameCanvas(shapes: shapes)
 
         case "ForEach":
             // Parse range argument: ForEach(0..<5) or ForEach(1...10)
@@ -2284,6 +2317,14 @@ public final class SwiftParser {
                     node = .propertyAccess(object: node, property: "self")
                     continue
                 }
+                if case .number(let n) = peek().type {
+                    // Tuple-element assignment target: `head.0 += 20`. Stored the
+                    // same way the read path does — propertyAccess with the index
+                    // as the property name ("0"/"1") — so the runtime can mutate it.
+                    _ = advance()
+                    node = .propertyAccess(object: node, property: n == floor(n) ? String(Int(n)) : String(n))
+                    continue
+                }
                 // Something unexpected after dot — give up on LHS parsing.
                 throw ParserError.unexpectedToken(peek(), expected: "property name")
             }
@@ -2526,12 +2567,16 @@ public final class SwiftParser {
         switch name {
         case "font":
             if let arg = arguments.first?.value {
-                let parsed = parseFont(arg)
-                // Only use dynamic if parseFont fell through to .body default AND the arg is dynamic
-                if case .body = parsed, isDynamicExpression(arg) {
+                // `.font(.title)` / `.font(.body)` / `.font(.system(...))` → static
+                // FontStyle. Only a variable that ISN'T a known style name (e.g.
+                // `.font(myFont)`) needs the dynamic resolve-at-render path —
+                // previously `.font(.body)` wrongly took that path and applied no font.
+                let knownStyles: Set<String> = ["largeTitle", "title", "title2", "title3",
+                    "headline", "subheadline", "body", "callout", "footnote", "caption", "caption2"]
+                if case .variable(let name) = arg, !knownStyles.contains(name) {
                     return .dynamic(name: "font", argument: arg)
                 }
-                return .font(parsed)
+                return .font(parseFont(arg))
             }
             return .font(.body)
 
@@ -2915,6 +2960,12 @@ public final class SwiftParser {
         case "onDisappear":
             return .onDisappear(nil) // action from trailing closure
 
+        case "onTick":
+            // `.onTick(<seconds>) { body }` — capture the interval now; the body
+            // is plugged in by `addTrailingClosure` when the closure is parsed.
+            let interval = arguments.first?.value ?? .literal(.number(0.2))
+            return .onTick(interval: interval, action: .empty)
+
         case "onChange":
             // Extract observed variable from `of:` argument
             var observedVar: String? = nil
@@ -3223,6 +3274,59 @@ public final class SwiftParser {
         }
     }
 
+    /// Parses one array-literal element. A leading `...` is a spread (splat):
+    /// `[a, ...others, b]` inlines `others`' elements. Modeled as a `_spread`
+    /// call that the evaluator flattens. Models reach for this constantly to
+    /// combine fixed items with a mapped collection (e.g. game shapes:
+    /// `GameCanvas([border, ...snake.map { ... }, food])`).
+    /// Parse `for <var> in <collection> { … }`. The loop var may be a single
+    /// name OR a tuple pattern `for (x, y) in pairs { … }` — destructuring is
+    /// stored as a comma-joined name list ("x,y") that the runtime splits and
+    /// binds element-wise per iteration.
+    private func parseForInLoop() throws -> ViewNode {
+        _ = advance() // consume 'for'
+        skipNewlines()
+        let varName: String
+        if check(.leftParen) {
+            _ = advance()
+            var names: [String] = []
+            while !check(.rightParen) && !isAtEnd {
+                if case .identifier(let id) = peek().type { names.append(id) }
+                _ = advance()
+                if check(.comma) { _ = advance() }
+            }
+            if check(.rightParen) { _ = advance() }
+            varName = names.joined(separator: ",")
+        } else if case .identifier(let id) = peek().type {
+            varName = id
+            _ = advance()
+        } else {
+            throw ParserError.unexpectedToken(peek(), expected: "loop variable after 'for'")
+        }
+        skipNewlines()
+        guard check(.keyword(.in)) else {
+            throw ParserError.unexpectedToken(peek(), expected: "'in' in for-loop")
+        }
+        _ = advance() // consume 'in'
+        skipNewlines()
+        // Parse the collection WITHOUT trailing-closure attachment, so the loop
+        // body's `{` isn't swallowed as a closure on the collection expression
+        // (same reason `if` conditions use parseConditionExpression).
+        let collection = try parseConditionExpression()
+        skipNewlines()
+        let body = try parseBraceBlock()
+        return .forInLoop(variable: varName, collection: collection, body: body)
+    }
+
+    private func parseArrayElement() throws -> ViewNode {
+        if check(.closedRange) { // the `...` token
+            _ = advance()
+            let expr = try parseExpression()
+            return .functionCall(name: "_spread", arguments: [Argument(label: nil, value: expr)])
+        }
+        return try parseExpression()
+    }
+
     private func parseFont(_ node: ViewNode) -> FontStyle {
         if case .variable(let name) = node {
             switch name {
@@ -3458,6 +3562,11 @@ public final class SwiftParser {
                 return applyModifier(to: base, modifier: .onTapGesture(body))
             case "onLongPressGesture":
                 return applyModifier(to: base, modifier: .onLongPressGesture(body))
+            case "onSwipe":
+                // .onSwipe { direction in … } — capture the closure's parameter
+                // name so the body can read the swipe direction string.
+                let param = lastClosureParam ?? "direction"
+                return applyModifier(to: base, modifier: .onSwipe(.closure(parameters: [param], body: body)))
             case "onChange":
                 return applyModifier(to: base, modifier: .onChange(variable: nil, action: body))
             case "onAppear":
@@ -3538,6 +3647,9 @@ public final class SwiftParser {
                 case .onChange(let variable, .empty):
                     mods[lastIdx] = .onChange(variable: variable, action: body)
                     return .modified(view: innerView, modifiers: mods)
+                case .onTick(let interval, .empty):
+                    mods[lastIdx] = .onTick(interval: interval, action: body)
+                    return .modified(view: innerView, modifiers: mods)
                 case .onAppear(nil):
                     mods[lastIdx] = .onAppear(body)
                     return .modified(view: innerView, modifiers: mods)
@@ -3596,6 +3708,24 @@ public final class SwiftParser {
     // MARK: - Argument Parsing
     
     private func parseArgument() throws -> Argument {
+        // Operator passed as an argument: `reduce(0, +)`, `sorted(by: >)`. A bare
+        // operator can't be parsed as an expression, so represent it as a variable
+        // named after the operator; reduce/sorted recognize or ignore it instead
+        // of failing the whole call.
+        if checkNext(.rightParen) || checkNext(.comma) {
+            let opName: String?
+            switch peek().type {
+            case .plus: opName = "+"
+            case .minus: opName = "-"
+            case .star: opName = "*"
+            case .slash: opName = "/"
+            case .lessThan: opName = "<"
+            case .greaterThan: opName = ">"
+            default: opName = nil
+            }
+            if let opName = opName { _ = advance(); return Argument(value: .variable(opName)) }
+        }
+
         // Check for labeled argument: `name: value`
         // Also handle keywords used as labels (e.g., `in:`, `for:`, `self:`)
         if checkNext(.colon) {

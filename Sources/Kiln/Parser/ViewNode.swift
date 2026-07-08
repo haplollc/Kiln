@@ -52,6 +52,11 @@ public indirect enum ViewNode: Equatable {
     /// ForEach over a collection: ForEach(items, id: \.self) { item in ... }
     case forEachCollection(collection: ViewNode, variable: String, body: ViewNode)
 
+    /// Statement-level `for x in collection { ... }` loop (in action/func
+    /// bodies, NOT a view). `collection` is an array expression or a range
+    /// (`0..<n` / `0...n`, stored as a comparison binary).
+    case forInLoop(variable: String, collection: ViewNode, body: ViewNode)
+
     /// TextField: TextField("Placeholder", text: $name)
     /// SecureField: SecureField("Password", text: $pw) — isSecure = true
     case textField(placeholder: String, variable: String, isSecure: Bool)
@@ -213,6 +218,14 @@ public indirect enum ViewNode: Equatable {
     /// numbers, or of objects with a numeric `value`/`y`/`amount` (and optional
     /// `label`/`name`/`x`).
     case chart(kind: KilnChartKind, data: ViewNode)
+
+    /// `GameCanvas(shapes)` — a real-time drawing surface backed by SwiftUI
+    /// `Canvas`. `shapes` evaluates to an array of shape objects, e.g.
+    /// `["type": "rect", "x": 10, "y": 10, "w": 20, "h": 20, "color": "lime"]`
+    /// (also "circle" with `r`, and "text" with `text`/`size`). Coordinates are
+    /// points from the top-left. Pair with `.onTick` to animate and `.onSwipe`
+    /// for input — this is how native (Kiln) games are built.
+    case gameCanvas(shapes: ViewNode)
 
     /// AsyncImage(url: ...) { phase in switch phase { case .empty: ... } }
     /// Holds per-phase view branches. Success branch's `imageBinding` names the
@@ -378,6 +391,7 @@ public enum LiteralValue: Equatable {
 
 public enum ColorValue: String, Equatable, CaseIterable {
     case red, orange, yellow, green, blue, purple, pink
+    case cyan, mint, teal, indigo, brown   // the rest of SwiftUI's standard colors
     case white, black, gray, clear
     case primary, secondary
 }
@@ -508,6 +522,14 @@ public enum ViewModifier: Equatable {
     // Interaction
     case onTapGesture(ViewNode)
     case onLongPressGesture(ViewNode)
+    /// `.onTick(interval) { … }` — runs the action every `interval` seconds on a
+    /// timer (the game/animation loop). The action mutates @State, which drives a
+    /// SwiftUI re-render. `interval` is the evaluated seconds expression.
+    case onTick(interval: ViewNode, action: ViewNode)
+    /// `.onSwipe { direction in … }` — a drag gesture that calls the closure with
+    /// a direction string ("up"/"down"/"left"/"right"). The closure's parameter
+    /// name is captured so the body can read it.
+    case onSwipe(ViewNode)
     case disabled(Bool)
     case hidden
     case allowsHitTesting(Bool)

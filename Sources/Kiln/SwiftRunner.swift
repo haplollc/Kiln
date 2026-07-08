@@ -54,18 +54,18 @@ public final class SwiftRunner: ObservableObject {
         // re-fired .onAppear when a tab toggles) still return cached data.
         SwiftRunnerState.clearFetchCache()
 
-        print("[SwiftRunner] run() called with code (\(code.count) chars):")
-        print("[SwiftRunner] ---BEGIN CODE---")
-        print(code)
-        print("[SwiftRunner] ---END CODE---")
+        KilnLog.d("[SwiftRunner] run() called with code (\(code.count) chars):")
+        KilnLog.d("[SwiftRunner] ---BEGIN CODE---")
+        KilnLog.d(code)
+        KilnLog.d("[SwiftRunner] ---END CODE---")
 
         do {
             // Tokenize
             let lexer = SwiftLexer(source: code)
             let tokens = try lexer.tokenize()
-            print("[SwiftRunner] Lexer produced \(tokens.count) tokens")
+            KilnLog.d("[SwiftRunner] Lexer produced \(tokens.count) tokens")
             for (i, tok) in tokens.enumerated() {
-                print("[SwiftRunner]   token[\(i)] = \(tok) (line \(tok.line))")
+                KilnLog.d("[SwiftRunner]   token[\(i)] = \(tok) (line \(tok.line))")
             }
 
             // Parse
@@ -78,7 +78,7 @@ public final class SwiftRunner: ObservableObject {
             ast = deduplicatePreview(ast, parsedStructs: parser.parsedStructs)
             dedupedASTForTesting = ast
 
-            print("[SwiftRunner] Parser produced AST: \(ast)")
+            KilnLog.d("[SwiftRunner] Parser produced AST: \(ast)")
 
             // Evaluate expressions and collect print output
             var output = ""
@@ -87,17 +87,17 @@ public final class SwiftRunner: ObservableObject {
 
             // Separate state variable declarations from view content
             let (stateVars, viewAST) = separateState(ast)
-            print("[SwiftRunner] State vars: \(stateVars)")
-            print("[SwiftRunner] View AST: \(viewAST)")
+            KilnLog.d("[SwiftRunner] State vars: \(stateVars)")
+            KilnLog.d("[SwiftRunner] View AST: \(viewAST)")
 
             // Strip .empty from top-level AST
             let cleanAST = stripEmpty(viewAST)
             cleanASTForTesting = cleanAST
-            print("[SwiftRunner] Clean AST: \(cleanAST)")
+            KilnLog.d("[SwiftRunner] Clean AST: \(cleanAST)")
 
             // Check if the AST represents a view
             let isView = isViewNode(cleanAST)
-            print("[SwiftRunner] isViewNode = \(isView)")
+            KilnLog.d("[SwiftRunner] isViewNode = \(isView)")
 
             if isView {
                 hasView = true
@@ -112,28 +112,39 @@ public final class SwiftRunner: ObservableObject {
                 // and computed properties dispatch on inner elements too.
                 state.typeSchemas = parser.parsedSchemas
                 let view = AnyView(DynamicView(ast: cleanAST, state: state))
-                print("[SwiftRunner] View built with state: \(stateVars)")
+                KilnLog.d("[SwiftRunner] View built with state: \(stateVars)")
                 return RunResult(view: view, consoleOutput: output, errors: [])
             } else {
-                print("[SwiftRunner] AST is NOT a view node — returning nil view")
-                return RunResult(view: nil, consoleOutput: output, errors: [])
+                KilnLog.d("[SwiftRunner] AST is NOT a view node — returning nil view")
+                // Don't fail silently: explain WHY no view came out so the caller
+                // (and a code-gen model) can fix it instead of seeing a bare
+                // "no view produced".
+                let viewStructs = parser.parsedStructs.keys.sorted()
+                let msg: String
+                if !viewStructs.isEmpty {
+                    msg = "No view was rendered. Found struct(s) \(viewStructs.joined(separator: ", ")), but the file's top level isn't a view. Define `struct ContentView: View { var body: some View { … } }` — Kiln renders ContentView automatically — and make sure `body` returns the view directly (not a reference like `\\(ContentView())` or a separate entry stub)."
+                } else {
+                    msg = "No SwiftUI view found. The entry file must itself be a complete `struct ContentView: View { var body: some View { … } }` with the whole program inside it — not a comment, a stub, or a reference such as `\\(ContentView())`."
+                }
+                errors = [msg]
+                return RunResult(view: nil, consoleOutput: output, errors: [msg])
             }
 
         } catch let error as LexerError {
             let msg = formatError(error.localizedDescription, line: error.line, sourceCode: code)
-            print("[SwiftRunner] LexerError: \(msg)")
+            KilnLog.d("[SwiftRunner] LexerError: \(msg)")
             errors = [msg]
             return RunResult(view: nil, consoleOutput: "", errors: [msg])
 
         } catch let error as ParserError {
             let msg = formatError(error.localizedDescription, line: error.line, sourceCode: code)
-            print("[SwiftRunner] ParserError: \(msg)")
+            KilnLog.d("[SwiftRunner] ParserError: \(msg)")
             errors = [msg]
             return RunResult(view: nil, consoleOutput: "", errors: [msg])
 
         } catch {
             let msg = error.localizedDescription
-            print("[SwiftRunner] Unknown error: \(msg)")
+            KilnLog.d("[SwiftRunner] Unknown error: \(msg)")
             errors = [msg]
             return RunResult(view: nil, consoleOutput: "", errors: [msg])
         }
@@ -301,7 +312,28 @@ public final class SwiftRunner: ObservableObject {
         case .literal(.string(let s)): return .string(s)
         case .literal(.boolean(let b)): return .boolean(b)
         case .literal(.nil): return .nil
-        case .arrayLiteral(let elements): return .array(elements.map { nodeToValue($0) })
+        case .arrayLiteral(let elements):
+            var out: [Value] = []
+            for el in elements {
+                if case .functionCall(let n, let a) = el, n == "_spread", let inner = a.first?.value,
+                   case .array(let items) = nodeToValue(inner) { out.append(contentsOf: items) }
+                else { out.append(nodeToValue(el)) }
+            }
+            return .array(out)
+        // Dict/object literals desugar to `_dictLiteral([[key, value], …])`. The
+        // runtime evaluator handles these, but @State initial values go through
+        // here — without this, `@State var snake = [["x": 1, "y": 2]]` initializes
+        // every object to nil (the bug behind blank native games / data lists).
+        case .functionCall(let name, let args) where name == "_dictLiteral":
+            var dict: [String: Value] = [:]
+            if let first = args.first, case .arrayLiteral(let pairs) = first.value {
+                for pair in pairs {
+                    guard case .arrayLiteral(let kv) = pair, kv.count == 2,
+                          case .string(let key) = nodeToValue(kv[0]) else { continue }
+                    dict[key] = nodeToValue(kv[1])
+                }
+            }
+            return .object(dict)
         // Handle unary minus: -1 is parsed as binary(0, -, 1)
         case .binary(let left, .minus, let right):
             if case .literal(.number(let l)) = left, l == 0,
@@ -325,7 +357,7 @@ public final class SwiftRunner: ObservableObject {
                 if case .assignment = cleaned { return cleaned }
                 // Drop other non-view nodes (functionCalls, etc.)
                 if !isViewNode(cleaned) {
-                    print("[SwiftRunner] stripEmpty: dropping non-view node: \(cleaned)")
+                    KilnLog.d("[SwiftRunner] stripEmpty: dropping non-view node: \(cleaned)")
                     return nil
                 }
                 return cleaned
@@ -516,7 +548,7 @@ public final class SwiftRunner: ObservableObject {
              .forEachCollection,
              .navigationStack, .navigationLink,
              .lazyVGrid, .lazyHGrid, .geometryReader, .linearGradient,
-             .asyncImagePhased, .gridItem, .chart:
+             .asyncImagePhased, .gridItem, .chart, .gameCanvas:
             return true
 
         case .block(let statements):

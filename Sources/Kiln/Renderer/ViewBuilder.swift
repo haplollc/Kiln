@@ -26,6 +26,11 @@ public struct DynamicViewBuilder {
 
     static func buildNode(_ node: ViewNode, state: SwiftRunnerState?) -> AnyView {
         switch node {
+        case .forInLoop:
+            // A statement-level for-loop is executed (in actions/funcs), never
+            // rendered as a view.
+            return AnyView(EmptyView())
+
         case .text(let content):
             return AnyView(Text(content))
 
@@ -39,7 +44,7 @@ public struct DynamicViewBuilder {
             return AnyView(
                 Button(action: {
                     if let action = action, let state = state {
-                        state.execute(action)
+                        state.runAction(action)
                     }
                 }) {
                     buildNode(label, state: state)
@@ -134,39 +139,53 @@ public struct DynamicViewBuilder {
             return AnyView(Divider())
 
         case .forEach(let range, let variable, let body):
-            return AnyView(
-                ForEach(Array(range), id: \.self) { index in
-                    let _ = {
-                        guard let state = state else { return }
-                        let value: Value = .number(Double(index))
-                        if variable != "_" { state.renderVariables[variable] = value }
-                        // Always bind `$0` so closures written without an
-                        // explicit `index in` parameter still work.
-                        state.renderVariables["0"] = value
-                    }()
-                    buildNode(body, state: state)
+            if let state = state {
+                // Eager-build each row with the index BAKED into its AST (like
+                // forEachCollection), so nested content — `items[i]`, `done[i]`,
+                // an HStack of Text — resolves the right index per row instead of
+                // lazily reading the last one.
+                var rows: [(Int, AnyView)] = []
+                for index in range {
+                    let value: Value = .number(Double(index))
+                    var subs: [String: Value] = ["0": value]
+                    if variable != "_" { subs[variable] = value }
+                    if variable != "_" { state.renderVariables[variable] = value }
+                    state.renderVariables["0"] = value
+                    rows.append((index, buildNode(bakeBindings(body, subs), state: state)))
                 }
-            )
+                return AnyView(ForEach(rows, id: \.0) { _, view in view })
+            }
+            return AnyView(EmptyView())
 
         case .forEachCollection(let collection, let variable, let body):
             if let state = state {
                 let collectionValue = state.evaluate(collection)
                 if case .array(let items) = collectionValue {
-                    return AnyView(
-                        ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
-                            let _ = {
-                                if variable != "_" { state.renderVariables[variable] = item }
-                                // Always bind `$0` (current item) and `$1`
-                                // (current index) so closures without an
-                                // explicit `item in` parameter still work.
-                                // This is what `ForEach(books) { BookCard(book: $0) }`
-                                // relies on.
-                                state.renderVariables["0"] = item
-                                state.renderVariables["1"] = .number(Double(offset))
-                            }()
-                            buildNode(body, state: state)
-                        }
-                    )
+                    // Build every row's view EAGERLY (bind the loop var → buildNode,
+                    // which bakes its content), then hand SwiftUI the finished
+                    // views. Doing the binding inside the ForEach content closure
+                    // instead let SwiftUI re-run/reorder it, so rows over a @State
+                    // collection ended up blank. Pre-building is deterministic.
+                    var rows: [(Int, AnyView)] = []
+                    rows.reserveCapacity(items.count)
+                    for (offset, item) in items.enumerated() {
+                        // Bake the loop var (and $0/$1) directly into THIS row's AST
+                        // as literals. Containers (HStack/VStack/ScrollView) build
+                        // their children through a lazy SwiftUI ForEach, so without
+                        // baking, a `Text(item)` nested in an HStack would resolve
+                        // `item` at render time — by then it's the last iteration's
+                        // value (every row showed the last item). Baking freezes
+                        // each row's value, in display AND action closures.
+                        var subs: [String: Value] = ["0": item, "1": .number(Double(offset))]
+                        if variable != "_" { subs[variable] = item }
+                        // Keep the live binding too, as a fallback for any node the
+                        // baker doesn't rewrite.
+                        if variable != "_" { state.renderVariables[variable] = item }
+                        state.renderVariables["0"] = item
+                        state.renderVariables["1"] = .number(Double(offset))
+                        rows.append((offset, buildNode(bakeBindings(body, subs), state: state)))
+                    }
+                    return AnyView(ForEach(rows, id: \.0) { _, view in view })
                 }
             }
             return AnyView(EmptyView())
@@ -416,8 +435,16 @@ public struct DynamicViewBuilder {
                let bodyNode = computedViewBody(named: name, state: state) {
                 return buildNode(bodyNode, state: state)
             }
+            // Otherwise it's a value used in a view position (e.g. `Button(key)`,
+            // `Text(item)`) — render its current value as text.
+            if let state = state { return textFromValue(state.evaluate(node)) }
             return AnyView(EmptyView())
-        case .empty, .binary, .propertyAccess, .arrayLiteral, .subscriptAccess, .methodCall, .valueLiteral:
+        case .binary, .propertyAccess, .arrayLiteral, .subscriptAccess, .methodCall, .valueLiteral:
+            // A value-producing expression placed in a view position renders as
+            // text (e.g. `Button(board[i])`, `Text(score + 1)`, a baked loop var).
+            if let state = state { return textFromValue(state.evaluate(node)) }
+            return AnyView(EmptyView())
+        case .empty:
             return AnyView(EmptyView())
         // Note: .stateInit is a render-time side-effect node, handled above.
 
@@ -464,6 +491,14 @@ public struct DynamicViewBuilder {
         case .chart(let kind, let data):
             let points = DynamicViewBuilder.chartPoints(from: state?.evaluate(data) ?? .nil)
             return AnyView(KilnChartView(kind: kind, points: points))
+
+        case .gameCanvas(let shapes):
+            // Evaluate the shapes array fresh each render. The host re-renders
+            // when @State changes (e.g. from .onTick / .onSwipe), so the drawing
+            // stays live without the canvas needing to observe state itself.
+            var items: [Value] = []
+            if case .array(let a)? = state?.evaluate(shapes) { items = a }
+            return AnyView(KilnGameCanvas(shapes: items))
 
         // MARK: Plan 8 — phased AsyncImage
         case .asyncImagePhased(let urlExpression, let emptyBranch, let successBranch, let failureBranch, let imageBinding):
@@ -765,6 +800,88 @@ public struct DynamicViewBuilder {
     /// Recursively substitute every `.variable(name)` inside `node` with `replacement`.
     /// Used by `.userModifier(...)` expansion so `content` references in the user's
     /// ViewModifier body become the actual receiver view node.
+    /// Replace ForEach loop-variable references (`subs` maps name → row value,
+    /// including "0"/"1" for `$0`/`$1`) with concrete `.valueLiteral`s throughout
+    /// a row body — nested containers, expressions, AND action closures — so lazy
+    /// SwiftUI rendering / deferred actions can't read a stale last-iteration
+    /// binding. The fix that makes `ForEach(items) { HStack { Text(item) } }`
+    /// show the right value (and `.onTapGesture { delete(item) }` act on it).
+    /// Render a value as a `Text` view (for value-producing expressions used in
+    /// a view position). `nil` renders nothing. Numbers use Value's own
+    /// whole-number-friendly formatting.
+    private static func textFromValue(_ v: Value) -> AnyView {
+        if case .nil = v { return AnyView(EmptyView()) }
+        return AnyView(Text(v.description))
+    }
+
+    static func bakeBindings(_ node: ViewNode, _ subs: [String: Value]) -> ViewNode {
+        func b(_ n: ViewNode) -> ViewNode { bakeBindings(n, subs) }
+        func arg(_ a: Argument) -> Argument { Argument(label: a.label, value: b(a.value)) }
+        switch node {
+        case .variable(let n): return subs[n].map { .valueLiteral($0) } ?? node
+        case .binding(let n): return subs[n].map { .valueLiteral($0) } ?? node
+        case .button(let label, let action): return .button(label: b(label), action: action.map(b))
+        case .vStack(let s, let a, let c): return .vStack(spacing: s, alignment: a, children: c.map(b))
+        case .hStack(let s, let a, let c): return .hStack(spacing: s, alignment: a, children: c.map(b))
+        case .zStack(let a, let c): return .zStack(alignment: a, children: c.map(b))
+        case .scrollView(let ax, let i, let ct): return .scrollView(axis: ax, showsIndicators: i, content: b(ct))
+        case .arrayLiteral(let els): return .arrayLiteral(els.map(b))
+        case .subscriptAccess(let o, let i): return .subscriptAccess(object: b(o), index: b(i))
+        case .methodCall(let o, let m, let args): return .methodCall(object: b(o), method: m, arguments: args.map(arg))
+        case .binary(let l, let op, let r): return .binary(left: b(l), op: op, right: b(r))
+        case .functionCall(let name, let args): return .functionCall(name: name, arguments: args.map(arg))
+        case .propertyAccess(let o, let p): return .propertyAccess(object: b(o), property: p)
+        case .ternary(let c, let t, let f): return .ternary(condition: b(c), trueExpr: b(t), falseExpr: b(f))
+        case .conditional(let c, let t, let e): return .conditional(condition: b(c), thenBody: b(t), elseBody: e.map(b))
+        case .block(let stmts): return .block(stmts.map(b))
+        case .compoundAssignment(let v, let op, let val): return .compoundAssignment(variable: v, op: op, value: b(val))
+        case .assignment(let n, let isVar, let v): return .assignment(name: n, isVar: isVar, value: b(v))
+        case .propertyAssignment(let t, let op, let v): return .propertyAssignment(target: b(t), op: op, value: b(v))
+        case .returnStmt(let e): return .returnStmt(e.map(b))
+        case .navigationLink(let l, let d): return .navigationLink(label: b(l), destination: b(d))
+        case .gameCanvas(let shapes): return .gameCanvas(shapes: b(shapes))
+        case .chart(let kind, let data): return .chart(kind: kind, data: b(data))
+        case .lazyVGrid(let cols, let s, let ct): return .lazyVGrid(columns: cols, spacing: s, content: b(ct))
+        case .lazyHGrid(let r, let s, let ct): return .lazyHGrid(rows: r, spacing: s, content: b(ct))
+        case .stringInterpolation(let parts):
+            return .stringInterpolation(parts.map { if case .expression(let e) = $0 { return .expression(b(e)) }; return $0 })
+        case .forInLoop(let v, let coll, let body):
+            // Substitute the collection; only descend into the body if the loop
+            // doesn't shadow one of our names.
+            return .forInLoop(variable: v, collection: b(coll), body: subs[v] == nil ? b(body) : body)
+        case .forEach(let r, let v, let body):
+            return .forEach(range: r, variable: v, body: subs[v] == nil ? b(body) : body)
+        case .forEachCollection(let coll, let v, let body):
+            return .forEachCollection(collection: b(coll), variable: v, body: subs[v] == nil ? b(body) : body)
+        case .modified(let v, let mods): return .modified(view: b(v), modifiers: mods.map { bakeModifier($0, subs) })
+        default:
+            return node
+        }
+    }
+
+    /// Bake loop-var values into the ViewNode payloads carried by action/content
+    /// modifiers (so `.onTapGesture { delete(item) }` on a ForEach row acts on
+    /// the right item). Non-node modifiers pass through unchanged.
+    private static func bakeModifier(_ mod: ViewModifier, _ subs: [String: Value]) -> ViewModifier {
+        func b(_ n: ViewNode) -> ViewNode { bakeBindings(n, subs) }
+        switch mod {
+        case .onTapGesture(let a): return .onTapGesture(b(a))
+        case .onLongPressGesture(let a): return .onLongPressGesture(b(a))
+        case .onTick(let i, let a): return .onTick(interval: b(i), action: b(a))
+        case .onSwipe(let a): return .onSwipe(b(a))
+        case .onAppear(let a): return .onAppear(a.map(b))
+        case .onDisappear(let a): return .onDisappear(a.map(b))
+        case .onChange(let v, let a): return .onChange(variable: v, action: b(a))
+        case .onSubmitAction(let a): return .onSubmitAction(b(a))
+        case .taskAction(let a): return .taskAction(b(a))
+        case .overlay(let n): return .overlay(b(n))
+        case .mask(let n): return .mask(b(n))
+        case .refreshable(let n): return .refreshable(b(n))
+        case .dynamic(let name, let argument): return .dynamic(name: name, argument: b(argument))
+        default: return mod
+        }
+    }
+
     private static func substituteContent(in node: ViewNode, name: String, with replacement: ViewNode) -> ViewNode {
         func s(_ n: ViewNode) -> ViewNode { substituteContent(in: n, name: name, with: replacement) }
         switch node {
@@ -936,9 +1053,17 @@ public struct DynamicViewBuilder {
             ))
         case .onTapGesture(let action):
             if let state = state {
-                return AnyView(view.onTapGesture { state.execute(action) })
+                return AnyView(view.onTapGesture { state.runAction(action) })
             }
             return AnyView(view.onTapGesture {})
+        case .onTick(let interval, let action):
+            guard let state = state else { return view }
+            var seconds = 0.2
+            if case .number(let n) = state.evaluate(interval) { seconds = n }
+            return AnyView(KilnTick(seconds: max(0.02, seconds), action: action, state: state, wrapped: view))
+        case .onSwipe(let action):
+            guard let state = state else { return view }
+            return AnyView(KilnSwipe(action: action, state: state, wrapped: view))
         case .disabled(let isDisabled):
             return AnyView(view.disabled(isDisabled))
         case .bold:
@@ -1025,9 +1150,9 @@ public struct DynamicViewBuilder {
         case .onAppear(let action):
             if let action = action, let state = state {
                 return AnyView(view.onAppear {
-                    print("[SR] onAppear fired — running action")
-                    state.execute(action)
-                    print("[SR] onAppear action returned")
+                    KilnLog.d("[SR] onAppear fired — running action")
+                    state.runAction(action)
+                    KilnLog.d("[SR] onAppear action returned")
                 })
             }
             return AnyView(view.onAppear {})
@@ -1039,9 +1164,9 @@ public struct DynamicViewBuilder {
             // network path when it encounters URLSession.shared.data(from:).
             if let state = state {
                 return AnyView(view.task {
-                    print("[SR] .task fired — running action async")
+                    KilnLog.d("[SR] .task fired — running action async")
                     await state.runAsync(action)
-                    print("[SR] .task action returned")
+                    KilnLog.d("[SR] .task action returned")
                 })
             }
             return view
@@ -1056,7 +1181,7 @@ public struct DynamicViewBuilder {
             if let state = state {
                 let idValue = state.evaluate(idExpression).description
                 return AnyView(view.task(id: idValue) {
-                    print("[SR] .task(id:) fired with id='\(idValue.prefix(80))'")
+                    KilnLog.d("[SR] .task(id:) fired with id='\(idValue.prefix(80))'")
                     await state.runAsync(action)
                 })
             }
@@ -1069,7 +1194,7 @@ public struct DynamicViewBuilder {
             // network call inside suspends without blocking the main thread.
             if let state = state {
                 return AnyView(view.onSubmit {
-                    print("[SR] .onSubmit fired")
+                    KilnLog.d("[SR] .onSubmit fired")
                     Task { @MainActor in
                         await state.runAsync(action)
                     }
@@ -1078,7 +1203,7 @@ public struct DynamicViewBuilder {
             return view
         case .onDisappear(let action):
             if let action = action, let state = state {
-                return AnyView(view.onDisappear { state.execute(action) })
+                return AnyView(view.onDisappear { state.runAction(action) })
             }
             return AnyView(view.onDisappear {})
         case .onChange(let variable, let action):
@@ -1148,13 +1273,13 @@ public struct DynamicViewBuilder {
         case .refreshable(let action):
             if let state = state {
                 return AnyView(view.refreshable {
-                    await MainActor.run { state.execute(action) }
+                    await MainActor.run { state.runAction(action) }
                 })
             }
             return view
         case .onLongPressGesture(let action):
             if let state = state {
-                return AnyView(view.onLongPressGesture { state.execute(action) })
+                return AnyView(view.onLongPressGesture { state.runAction(action) })
             }
             return AnyView(view.onLongPressGesture {})
         case .contentShape:
@@ -1559,6 +1684,11 @@ public struct DynamicViewBuilder {
         case .blue: return .blue
         case .purple: return .purple
         case .pink: return .pink
+        case .cyan: return .cyan
+        case .mint: return .mint
+        case .teal: return .teal
+        case .indigo: return .indigo
+        case .brown: return .brown
         case .white: return .white
         case .black: return .black
         case .gray: return .gray
@@ -1772,5 +1902,167 @@ struct KilnDragToMove<Wrapped: View>: View {
                         }
                     }
             )
+    }
+}
+
+// MARK: - Games / animation (GameCanvas + onTick + onSwipe)
+
+/// `GameCanvas(shapes)` — draws an array of shape objects with SwiftUI `Canvas`.
+/// Each shape is an object: `["type": "rect"|"circle"|"text", "x":, "y":, …]`.
+/// rect uses `w`/`h`; circle uses `r` (centered on x,y); text uses `text`/`size`.
+/// `color` is a name ("lime", "red", …) or hex ("#34C759"). Origin is top-left.
+@MainActor
+struct KilnGameCanvas: View {
+    let shapes: [Value]
+
+    var body: some View {
+        // The interpreted code draws in whatever coordinate space it chose (often
+        // a hardcoded ~393×800). To fill the real screen edge-to-edge — instead of
+        // leaving black margins on a larger device — we scale the whole drawing so
+        // the "board" (the largest rect anchored at the origin) fills the canvas.
+        let board = Self.backgroundRect(shapes)
+        return Canvas { ctx, size in
+            if let board, board.w > 1, board.h > 1 {
+                ctx.scaleBy(x: size.width / board.w, y: size.height / board.h)
+            }
+            for item in shapes {
+                guard case .object(let s) = item else { continue }
+                let type = Self.str(s["type"]) ?? "rect"
+                let x = Self.num(s["x"]) ?? 0
+                let y = Self.num(s["y"]) ?? 0
+                let color = Self.color(s["color"])
+                switch type {
+                case "circle":
+                    let r = Self.num(s["r"]) ?? Self.num(s["radius"]) ?? 5
+                    ctx.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
+                             with: .color(color))
+                case "text":
+                    let text = Self.str(s["text"]) ?? ""
+                    let size = Self.num(s["size"]) ?? 16
+                    let resolved = ctx.resolve(
+                        Text(text).font(.system(size: size, weight: .semibold)).foregroundColor(color))
+                    ctx.draw(resolved, at: CGPoint(x: x, y: y), anchor: .topLeading)
+                default: // "rect"
+                    let w = Self.num(s["w"]) ?? Self.num(s["width"]) ?? 10
+                    let h = Self.num(s["h"]) ?? Self.num(s["height"]) ?? 10
+                    ctx.fill(Path(CGRect(x: x, y: y, width: w, height: h)), with: .color(color))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Match the board color so any rounding gap blends in (not black).
+        .background(board?.color ?? Color.black)
+        .ignoresSafeArea()
+    }
+
+    /// The largest rectangle anchored at the origin — treated as the full "board"
+    /// whose size defines the drawing's coordinate space (for scale-to-fill) and
+    /// whose color backs the canvas.
+    private static func backgroundRect(_ shapes: [Value]) -> (w: CGFloat, h: CGFloat, color: Color)? {
+        var best: (w: CGFloat, h: CGFloat, color: Color)?
+        for item in shapes {
+            guard case .object(let s) = item else { continue }
+            guard (str(s["type"]) ?? "rect") == "rect" else { continue }
+            let x = num(s["x"]) ?? 0, y = num(s["y"]) ?? 0
+            guard x <= 1, y <= 1 else { continue }          // origin-anchored
+            let w = num(s["w"]) ?? num(s["width"]) ?? 0
+            let h = num(s["h"]) ?? num(s["height"]) ?? 0
+            if best == nil || w * h > best!.w * best!.h {
+                best = (w, h, color(s["color"]))
+            }
+        }
+        return best
+    }
+
+    private static func num(_ v: Value?) -> CGFloat? {
+        if case .number(let n)? = v { return CGFloat(n) }
+        return nil
+    }
+    private static func str(_ v: Value?) -> String? {
+        if case .string(let s)? = v { return s }
+        return nil
+    }
+    /// Color from a name or hex string; defaults to white.
+    static func color(_ v: Value?) -> Color {
+        guard case .string(let raw)? = v else { return .white }
+        let s = raw.lowercased().trimmingCharacters(in: .whitespaces)
+        switch s {
+        case "black": return .black
+        case "white": return .white
+        case "red": return .red
+        case "green": return .green
+        case "lime": return Color(red: 0.2, green: 0.9, blue: 0.2)
+        case "blue": return .blue
+        case "yellow": return .yellow
+        case "orange": return .orange
+        case "purple": return .purple
+        case "pink": return .pink
+        case "gray", "grey": return .gray
+        case "cyan": return .cyan
+        case "mint": return .mint
+        case "teal": return .teal
+        case "indigo": return .indigo
+        case "brown": return .brown
+        default:
+            if s.hasPrefix("#"), let c = Color(hex: s) { return c }
+            return .white
+        }
+    }
+}
+
+private extension Color {
+    /// Parse "#RGB" / "#RRGGBB" hex.
+    init?(hex: String) {
+        var h = hex
+        if h.hasPrefix("#") { h.removeFirst() }
+        if h.count == 3 { h = h.map { "\($0)\($0)" }.joined() }
+        guard h.count == 6, let v = Int(h, radix: 16) else { return nil }
+        self = Color(red: Double((v >> 16) & 0xFF) / 255,
+                     green: Double((v >> 8) & 0xFF) / 255,
+                     blue: Double(v & 0xFF) / 255)
+    }
+}
+
+/// `.onTick(seconds) { … }` — runs the interpreted action on a repeating timer.
+/// The action mutates @State, which re-renders the host (and the GameCanvas).
+@MainActor
+struct KilnTick<Wrapped: View>: View {
+    let seconds: Double
+    let action: ViewNode
+    let state: SwiftRunnerState
+    let wrapped: Wrapped
+
+    var body: some View {
+        wrapped.onReceive(
+            Timer.publish(every: seconds, on: .main, in: .common).autoconnect()
+        ) { _ in
+            state.runAction(action)
+        }
+    }
+}
+
+/// `.onSwipe { direction in … }` — a drag gesture that binds the swipe direction
+/// ("up"/"down"/"left"/"right") to the closure's parameter, then runs its body.
+@MainActor
+struct KilnSwipe<Wrapped: View>: View {
+    let action: ViewNode
+    let state: SwiftRunnerState
+    let wrapped: Wrapped
+
+    var body: some View {
+        wrapped.gesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { v in
+                    let dx = v.translation.width, dy = v.translation.height
+                    let dir = abs(dx) > abs(dy) ? (dx > 0 ? "right" : "left")
+                                                : (dy > 0 ? "down" : "up")
+                    if case .closure(let params, let body) = action {
+                        if let p = params.first { state.renderVariables[p] = .string(dir) }
+                        state.runAction(body)
+                    } else {
+                        state.runAction(action)
+                    }
+                }
+        )
     }
 }

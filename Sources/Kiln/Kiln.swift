@@ -9,6 +9,18 @@
 
 import SwiftUI
 
+/// Gated debug logging for the interpreter. OFF by default — the parser/runtime
+/// emit very chatty traces (including full AST descriptions) that, when always
+/// printed, both spam the console and noticeably slow execution (the giant
+/// strings get built even when nobody reads them). The `@autoclosure` means the
+/// message isn't even constructed unless logging is enabled.
+public enum KilnLog {
+    nonisolated(unsafe) public static var enabled = false
+    @inline(__always) static func d(_ message: @autoclosure () -> String) {
+        if enabled { print(message()) }
+    }
+}
+
 // MARK: - Top-level namespace
 
 /// Kiln runs Swift / SwiftUI source code at runtime inside your app.

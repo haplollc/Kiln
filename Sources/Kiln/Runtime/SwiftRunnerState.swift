@@ -16,6 +16,54 @@ public final class SwiftRunnerState: ObservableObject {
     /// Changes here do NOT trigger SwiftUI re-renders, avoiding infinite loops.
     public var renderVariables: [String: Value] = [:]
 
+    /// > 0 while executing a user ACTION (button tap, .onTick, .onSwipe, …),
+    /// set by `runAction`. Variable writes only target the @Published `variables`
+    /// (and thus re-render) while an action is running. Writes that happen during
+    /// RENDER — e.g. a helper function called from the view body, `func cells() {
+    /// var shapes = []; … }` — are routed to the non-published `renderVariables`
+    /// instead, so they can't trigger the "modify state during view update"
+    /// infinite re-render loop that otherwise hangs the app.
+    public var actionDepth = 0
+
+    /// Run a user action and publish exactly one change afterward. All state
+    /// mutations inside go to `variables` (reactive); the single re-render happens
+    /// when this returns.
+    public func runAction(_ node: ViewNode) {
+        actionDepth += 1
+        defer { actionDepth -= 1 }
+        execute(node)
+    }
+
+    /// Bind a for-loop variable to the current item. Handles tuple-destructuring
+    /// patterns (`for (x, y) in pairs` → variable is "x,y"): the item is an array
+    /// whose elements bind to each name positionally (`_` is skipped).
+    func bindLoopVariable(_ variable: String, _ item: Value) {
+        if variable.contains(",") {
+            let names = variable.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            if case .array(let elts) = item {
+                for (i, n) in names.enumerated() where n != "_" {
+                    setVariable(n, i < elts.count ? elts[i] : .nil)
+                }
+            } else {
+                for (i, n) in names.enumerated() where n != "_" { setVariable(n, i == 0 ? item : .nil) }
+            }
+        } else if variable != "_" {
+            setVariable(variable, item)
+        }
+    }
+
+    /// Write a variable into the correct store: the reactive `variables` during an
+    /// action (so the UI updates), or the non-reactive `renderVariables` during
+    /// render (so a body-time computation can't loop the renderer).
+    func setVariable(_ name: String, _ value: Value) {
+        if actionDepth > 0 {
+            variables[name] = value
+            renderVariables[name] = value
+        } else {
+            renderVariables[name] = value
+        }
+    }
+
     // MARK: - Plan 2: user-defined function table
     //
     // Key conventions:
@@ -53,6 +101,7 @@ public final class SwiftRunnerState: ObservableObject {
 
     public init(_ initial: [String: Value] = [:]) {
         self.variables = initial
+        Swift.print("INIT_VARS keys=\(initial.keys.sorted()) snake=\(initial["snake"] ?? .nil) cells=\(String(describing: initial["cells"]).prefix(60))")
         // Build banner — if you don't see this in the console when the view
         // renders, your app is running a STALE Kuzco build. Clean DerivedData,
         // reset Swift Package caches, and rebuild.
@@ -196,6 +245,11 @@ public final class SwiftRunnerState: ObservableObject {
     /// real `await URLSession.shared.data(from:)` in `performAsyncFetch`
     /// suspends without blocking the main thread.
     public func runAsync(_ action: ViewNode) async {
+        // Async actions (.task / .onChange / .onSubmit) are still ACTIONS: raise
+        // actionDepth so their state writes target the reactive `variables` and
+        // re-render, mirroring the sync `runAction`.
+        actionDepth += 1
+        defer { actionDepth -= 1 }
         do {
             try await executeWithReturnAsync(action)
         } catch let signal as ReturnSignal {
@@ -427,7 +481,9 @@ public final class SwiftRunnerState: ObservableObject {
     /// Apply a compound-assignment op to the variables/renderVariables stores.
     /// Factored out so both sync and async execute paths can share it.
     private func applyCompoundAssignment(variable: String, op: CompoundOp, newValue: Value) {
-        let current = variables[variable] ?? .nil
+        // Prefer the render shadow if present (matches the sync compound path and
+        // evaluate()), so `x += 1` in an async body reads the freshest value.
+        let current = renderVariables[variable] ?? variables[variable] ?? .nil
         switch op {
         case .assign:
             variables[variable] = newValue
@@ -493,64 +549,87 @@ public final class SwiftRunnerState: ObservableObject {
             if !evaluate(cond).isTruthy {
                 try executeWithReturn(elseBlock)
             }
+        case .forInLoop(let variable, let collection, let body):
+            // Run via executeWithReturn so a `return` inside the loop propagates.
+            // Bind via setVariable so a loop inside a render-time helper (e.g.
+            // `func cells() { for c in landed { … } }`) writes the non-published
+            // store and can't trigger the re-render loop.
+            for item in iterationValues(for: collection) {
+                bindLoopVariable(variable, item)
+                try executeWithReturn(body)
+            }
         default:
             execute(node)
         }
     }
 
     /// Execute an action node (compound assignment, block, toggle, etc.)
+    /// Evaluates an argument to an Int (for array slice counts like dropLast(n)).
+    private func intArg(_ arg: Argument?) -> Int? {
+        guard let arg = arg else { return nil }
+        if case .number(let n) = evaluate(arg.value) { return Int(n) }
+        return nil
+    }
+
     public func execute(_ action: ViewNode) {
         print("[State] execute: \(action)")
         switch action {
         case .compoundAssignment(let variable, let op, let valueNode):
-            let current = variables[variable] ?? .nil
+            let current = renderVariables[variable] ?? variables[variable] ?? .nil
             let newValue = evaluate(valueNode)
+            let result: Value
             switch op {
             case .assign:
-                variables[variable] = newValue
+                result = newValue
             case .plusAssign:
                 if case .number(let lhs) = current, case .number(let rhs) = newValue {
-                    variables[variable] = .number(lhs + rhs)
+                    result = .number(lhs + rhs)
                 } else {
-                    variables[variable] = .string(current.description + newValue.description)
+                    result = .string(current.description + newValue.description)
                 }
             case .minusAssign:
-                if case .number(let lhs) = current, case .number(let rhs) = newValue {
-                    variables[variable] = .number(lhs - rhs)
-                }
+                if case .number(let lhs) = current, case .number(let rhs) = newValue { result = .number(lhs - rhs) } else { result = current }
             case .mulAssign:
-                if case .number(let lhs) = current, case .number(let rhs) = newValue {
-                    variables[variable] = .number(lhs * rhs)
-                }
+                if case .number(let lhs) = current, case .number(let rhs) = newValue { result = .number(lhs * rhs) } else { result = current }
             case .divAssign:
-                if case .number(let lhs) = current, case .number(let rhs) = newValue, rhs != 0 {
-                    variables[variable] = .number(lhs / rhs)
-                }
+                if case .number(let lhs) = current, case .number(let rhs) = newValue, rhs != 0 { result = .number(lhs / rhs) } else { result = current }
             case .toggle:
-                if case .boolean(let b) = current {
-                    variables[variable] = .boolean(!b)
-                }
+                if case .boolean(let b) = current { result = .boolean(!b) } else { result = current }
             }
-            // Plan 5 capstone fix: keep renderVariables in sync so reads via
-            // `.variable(name)` (which prefer renderVariables) see the new value.
-            // Without this, `books = mergeBooks(...)` writes `variables[books]`
-            // but a stale `renderVariables[books]` would shadow the result.
-            if renderVariables[variable] != nil {
-                renderVariables[variable] = variables[variable]
-            }
-            let summary = (variables[variable] ?? .nil).description.prefix(120)
-            print("[SR] assign: \(variable) = \(summary)")
+            // Routes to `variables` (reactive) during an action, or
+            // `renderVariables` (non-reactive) during render — see setVariable.
+            setVariable(variable, result)
+            KilnLog.d("[SR] assign: \(variable) = \(result.description.prefix(120))")
 
         case .block(let statements):
             for stmt in statements {
                 execute(stmt)
             }
 
+        // `if`/`else` inside an action block (e.g. a Button action, .onTick or
+        // .onSwipe handler). Without this, conditionals were silently skipped —
+        // which made e.g. game bounce/collision checks no-ops.
+        case .conditional(let cond, let thenBody, let elseBody):
+            if evaluate(cond).isTruthy {
+                execute(thenBody)
+            } else if let elseBody = elseBody {
+                execute(elseBody)
+            }
+
+        // `for x in collection { ... }` in an action/func body. Iterates an
+        // array, or a range when the collection is written as `0..<n` / `0...n`
+        // (which parse to a comparison binary). The loop var is bound for each
+        // iteration; the body executes with it in scope.
+        case .forInLoop(let variable, let collection, let body):
+            for item in iterationValues(for: collection) {
+                bindLoopVariable(variable, item)
+                execute(body)
+            }
+
         // Handle assignment to expression (e.g., requirements[0].isMet = value)
         case .assignment(let name, _, let value):
             let val = evaluate(value)
-            variables[name] = val
-            renderVariables[name] = val
+            setVariable(name, val)
 
         case .empty:
             break
@@ -561,8 +640,57 @@ public final class SwiftRunnerState: ObservableObject {
         // `variables`.
         case .functionCall:
             _ = evaluate(action)
-        case .methodCall:
-            _ = evaluate(action)
+        case .methodCall(let obj, let method, let margs):
+            // In-place STRING mutation: `text.append("x")` / `text.removeAll()`.
+            if case .variable(let name) = obj,
+               case .string(var s)? = (renderVariables[name] ?? variables[name]),
+               ["append", "removeAll"].contains(method) {
+                if method == "append", let a = margs.first {
+                    s += evaluate(a.value).description
+                } else if method == "removeAll" {
+                    s = ""
+                }
+                setVariable(name, .string(s))
+                return
+            }
+            // In-place ARRAY mutation: `items.append(x)`, `items.remove(at: i)`,
+            // `items.removeLast()`, `items.removeAll()`, `items.insert(x, at: i)`,
+            // `items.sort()`. Swift mutates in place; the interpreter has no
+            // references, so we recompute the array and write it back to the var.
+            if case .variable(let name) = obj,
+               case .array(var arr)? = (renderVariables[name] ?? variables[name]),
+               ["append", "remove", "removeLast", "removeFirst", "removeAll", "insert", "sort", "reverse", "shuffle"].contains(method) {
+                switch method {
+                case "append":
+                    if let a = margs.first { arr.append(evaluate(a.value)) }
+                case "insert":
+                    let v = (margs.first(where: { $0.label == nil }) ?? margs.first).map { evaluate($0.value) } ?? .nil
+                    let at = margs.first(where: { $0.label == "at" }).flatMap { i -> Int? in
+                        if case .number(let n) = evaluate(i.value) { return Int(n) }; return nil
+                    } ?? arr.count
+                    arr.insert(v, at: Swift.max(0, Swift.min(at, arr.count)))
+                case "remove":
+                    if let at = margs.first(where: { $0.label == "at" }) ?? margs.first,
+                       case .number(let n) = evaluate(at.value), Int(n) >= 0, Int(n) < arr.count {
+                        arr.remove(at: Int(n))
+                    }
+                case "removeLast": if !arr.isEmpty { arr.removeLast() }
+                case "removeFirst": if !arr.isEmpty { arr.removeFirst() }
+                case "removeAll": arr.removeAll()
+                case "reverse": arr.reverse()
+                case "shuffle": arr.shuffle()
+                case "sort":
+                    arr.sort { a, b in
+                        if case .number(let x) = a, case .number(let y) = b { return x < y }
+                        if case .string(let x) = a, case .string(let y) = b { return x < y }
+                        return false
+                    }
+                default: break
+                }
+                setVariable(name, .array(arr))
+            } else {
+                _ = evaluate(action)
+            }
 
         // MARK: Plan 1 — stubbed-execution cases
         case .switchStmt:
@@ -632,7 +760,15 @@ public final class SwiftRunnerState: ObservableObject {
     public func evaluate(_ node: ViewNode) -> Value {
         switch node {
         case .variable(let name):
-            return renderVariables[name] ?? variables[name] ?? .nil
+            if let v = renderVariables[name] ?? variables[name] { return v }
+            // Computed property: `var doubled: Int { count * 2 }` is hoisted as a
+            // zero-arg function (often namespaced like "ContentView.doubled").
+            // Referencing it by name invokes the getter.
+            if let key = functions.keys.first(where: { $0 == name || $0.hasSuffix(".\(name)") }),
+               case .functionDecl(_, let params, _, _, _)? = functions[key], params.isEmpty {
+                return callUserFunction(key: key, arguments: [])
+            }
+            return .nil
         case .literal(let lit):
             switch lit {
             case .number(let n): return .number(n)
@@ -652,7 +788,17 @@ public final class SwiftRunnerState: ObservableObject {
         case .ternary(let condition, let trueExpr, let falseExpr):
             return evaluate(condition).isTruthy ? evaluate(trueExpr) : evaluate(falseExpr)
         case .arrayLiteral(let elements):
-            return .array(elements.map { evaluate($0) })
+            // Flatten spread elements (`[a, ...others, b]`): a `_spread(expr)`
+            // element inlines expr's array contents instead of nesting.
+            var out: [Value] = []
+            for el in elements {
+                if case .functionCall(let n, let args) = el, n == "_spread", let inner = args.first?.value {
+                    if case .array(let items) = evaluate(inner) { out.append(contentsOf: items) }
+                } else {
+                    out.append(evaluate(el))
+                }
+            }
+            return .array(out)
         case .binding(let name):
             // $0, $1 etc. as implicit closure params — look up like variables
             return renderVariables[name] ?? variables[name] ?? .nil
@@ -667,6 +813,12 @@ public final class SwiftRunnerState: ObservableObject {
                 let i = Int(n)
                 let chars = Array(s)
                 if i >= 0 && i < chars.count { return .string(String(chars[i])) }
+            }
+            // Object access by string key: `obj["x"]` / `snake[0]["x"]`. Without
+            // this, interpreted code could BUILD objects but never READ their
+            // fields — every `dict["key"]` returned nil (blank data-driven apps).
+            if case .object(let dict) = objVal, case .string(let key) = idxVal {
+                return dict[key] ?? .nil
             }
             return .nil
         case .methodCall(let obj, let method, let args):
@@ -683,6 +835,21 @@ public final class SwiftRunnerState: ObservableObject {
                 // Host-injected namespaced bridge, e.g. `Health.steps()`.
                 if let bridge = Self.nativeBridges[key] {
                     return bridge(args.map { evaluate($0.value) })
+                }
+                // `Int.random(in: 0..<10)` / `Double.random(in: 0...1)`. The range
+                // `0..<10` parses as `.binary(0, .less, 10)` (.lessEqual = `...`).
+                if (typeName == "Int" || typeName == "Double") && method == "random" {
+                    if let arg = args.first(where: { $0.label == "in" }) ?? args.first,
+                       case .binary(let lo, let rop, let hi) = arg.value,
+                       case .number(let a) = evaluate(lo), case .number(let b) = evaluate(hi) {
+                        if typeName == "Int" {
+                            let upper = rop == .lessEqual ? Int(b) : Int(b) - 1   // ... vs ..<
+                            if Int(a) <= upper { return .number(Double(Int.random(in: Int(a)...upper))) }
+                            return .number(a)
+                        } else {
+                            return .number(Double.random(in: a...max(a, b)))
+                        }
+                    }
                 }
             }
             return evaluateMethodCall(obj: evaluate(obj), method: method, args: args)
@@ -1146,6 +1313,21 @@ public final class SwiftRunnerState: ObservableObject {
         }
     }
 
+    /// Values to iterate for a `for x in …` loop: a range (`0..<n` / `0...n`,
+    /// which parse to a `.less`/`.lessEqual` comparison binary) or an array.
+    private func iterationValues(for collection: ViewNode) -> [Value] {
+        if case .binary(let lo, let op, let hi) = collection, op == .less || op == .lessEqual {
+            if case .number(let l) = evaluate(lo), case .number(let h) = evaluate(hi) {
+                let upper = op == .less ? Int(h) - 1 : Int(h)
+                guard Int(l) <= upper else { return [] }
+                return (Int(l)...upper).map { .number(Double($0)) }
+            }
+            return []
+        }
+        if case .array(let items) = evaluate(collection) { return items }
+        return []
+    }
+
     private enum PathSegment {
         case key(String)
         case index(Int)
@@ -1157,6 +1339,8 @@ public final class SwiftRunnerState: ObservableObject {
             switch seg {
             case .key(let k):
                 if case .object(let d) = current { current = d[k] ?? .nil }
+                // Numeric key on an array is a tuple-element read (`head.0`).
+                else if case .array(let a) = current, let i = Int(k), i >= 0, i < a.count { current = a[i] }
                 else { return .nil }
             case .index(let i):
                 if case .array(let a) = current, i >= 0 && i < a.count { current = a[i] }
@@ -1171,6 +1355,13 @@ public final class SwiftRunnerState: ObservableObject {
         let rest = Array(path.dropFirst())
         switch first {
         case .key(let k):
+            // Numeric key into an array is a tuple-element write (`head.0 += 20`).
+            if case .array(let a) = value, let i = Int(k) {
+                var arr = a
+                while arr.count <= i { arr.append(.nil) }
+                arr[i] = writeInto(value: arr[i], path: rest, newValue: newValue)
+                return .array(arr)
+            }
             var dict: [String: Value] = {
                 if case .object(let d) = value { return d }
                 return [:]
@@ -1292,8 +1483,50 @@ public final class SwiftRunnerState: ObservableObject {
             return evaluateClosureMethod(arr: arr, method: "first", closure: args.first?.value)
         case (.array(let arr), "reversed"):
             return .array(arr.reversed())
+        case (.array(let arr), "dropLast"):
+            let n = intArg(args.first) ?? 1
+            return .array(Array(arr.dropLast(max(0, n))))
+        case (.array(let arr), "dropFirst"):
+            let n = intArg(args.first) ?? 1
+            return .array(Array(arr.dropFirst(max(0, n))))
+        case (.array(let arr), "prefix"):
+            let n = intArg(args.first) ?? 0
+            return .array(Array(arr.prefix(max(0, n))))
+        case (.array(let arr), "suffix"):
+            let n = intArg(args.first) ?? 0
+            return .array(Array(arr.suffix(max(0, n))))
         case (.array(let arr), "sorted"):
-            return .array(arr) // simplified — no comparator support
+            // Ascending sort for the common homogeneous numeric/string cases.
+            if arr.allSatisfy({ if case .number = $0 { return true }; return false }) {
+                return .array(arr.sorted { a, b in
+                    if case .number(let x) = a, case .number(let y) = b { return x < y }; return false
+                })
+            }
+            if arr.allSatisfy({ if case .string = $0 { return true }; return false }) {
+                return .array(arr.sorted { a, b in
+                    if case .string(let x) = a, case .string(let y) = b { return x < y }; return false
+                })
+            }
+            return .array(arr)
+        case (.array(let arr), "randomElement"):
+            return arr.randomElement() ?? .nil
+        case (.array(let arr), "shuffled"):
+            return .array(arr.shuffled())
+        case (.array(let arr), "min"):
+            let nums = arr.compactMap { if case .number(let n) = $0 { return n } else { return nil } }
+            return nums.min().map { .number($0) } ?? .nil
+        case (.array(let arr), "max"):
+            let nums = arr.compactMap { if case .number(let n) = $0 { return n } else { return nil } }
+            return nums.max().map { .number($0) } ?? .nil
+        case (.array(let arr), "sum"), (.array(let arr), "reduce"):
+            // `reduce(0, +)` / `reduce(initial, +)` — numeric sum (the dominant
+            // use). Closure-form reduce isn't needed for typical generated code.
+            var total = 0.0
+            if case .number(let initVal)? = args.first.map({ evaluate($0.value) }) { total = initVal }
+            for v in arr { if case .number(let n) = v { total += n } }
+            return .number(total)
+        case (.array(let arr), "indices"):
+            return .array((0..<arr.count).map { .number(Double($0)) })
         case (.array(let arr), "joined"):
             // Array of strings → single string with separator
             let sep: String = {
@@ -1342,6 +1575,30 @@ public final class SwiftRunnerState: ObservableObject {
             return .boolean(s.contains(where: { $0.isNumber }))
         case (.string(let s), "isNotEmpty"):
             return .boolean(!s.isEmpty)
+        case (.string(let s), "capitalized"):
+            return .string(s.capitalized)
+        case (.string(let s), "reversed"):
+            return .string(String(s.reversed()))
+        case (.string(let s), "split"):
+            // split(separator: ",") → array of substrings.
+            var sep = " "
+            if let a = args.first(where: { $0.label == "separator" }) ?? args.first,
+               case .string(let ss) = evaluate(a.value), !ss.isEmpty { sep = ss }
+            return .array(s.components(separatedBy: sep).map { .string($0) })
+        case (.string(let s), "replacingOccurrences"):
+            // replacingOccurrences(of: "a", with: "b").
+            let of = args.first(where: { $0.label == "of" }).map { evaluate($0.value) }
+            let with = args.first(where: { $0.label == "with" }).map { evaluate($0.value) }
+            if case .string(let o)? = of, case .string(let w)? = with {
+                return .string(s.replacingOccurrences(of: o, with: w))
+            }
+            return .string(s)
+        case (.string(let s), "prefix"):
+            let n = intArg(args.first) ?? 0
+            return .string(String(s.prefix(max(0, n))))
+        case (.string(let s), "suffix"):
+            let n = intArg(args.first) ?? 0
+            return .string(String(s.suffix(max(0, n))))
 
         // Number methods
         case (.number(let n), "rounded"):
@@ -1475,6 +1732,8 @@ public final class SwiftRunnerState: ObservableObject {
         switch op {
         case .plus:
             if case .number(let l) = left, case .number(let r) = right { return .number(l + r) }
+            // Array concatenation: [a] + [b] → [a, b] (e.g. growing a snake).
+            if case .array(let l) = left, case .array(let r) = right { return .array(l + r) }
             return .string(left.description + right.description)
         case .minus:
             if case .number(let l) = left, case .number(let r) = right { return .number(l - r) }
@@ -1536,6 +1795,22 @@ public final class SwiftRunnerState: ObservableObject {
             if let first = arguments.first, case .number(let n) = evaluate(first.value) {
                 return .number(abs(n))
             }
+        case "sqrt":
+            if let first = arguments.first, case .number(let n) = evaluate(first.value) {
+                return .number(n < 0 ? 0 : n.squareRoot())
+            }
+        case "pow":
+            if arguments.count >= 2,
+               case .number(let b) = evaluate(arguments[0].value),
+               case .number(let e) = evaluate(arguments[1].value) {
+                return .number(pow(b, e))
+            }
+        case "floor":
+            if let first = arguments.first, case .number(let n) = evaluate(first.value) { return .number(floor(n)) }
+        case "ceil":
+            if let first = arguments.first, case .number(let n) = evaluate(first.value) { return .number(ceil(n)) }
+        case "round":
+            if let first = arguments.first, case .number(let n) = evaluate(first.value) { return .number(n.rounded()) }
         case "String":
             if let first = arguments.first { return .string(evaluate(first.value).description) }
         case "Int":

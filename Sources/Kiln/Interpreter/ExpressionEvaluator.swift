@@ -149,6 +149,11 @@ public final class ExpressionEvaluator {
             if case .number(let l) = leftVal, case .number(let r) = rightVal {
                 return .number(l + r)
             }
+            // Array concatenation: [a] + [b] → [a, b] (used for e.g. growing a
+            // snake: `[head] + body`, or appending: `out + [item]`).
+            if case .array(let l) = leftVal, case .array(let r) = rightVal {
+                return .array(l + r)
+            }
             // String concatenation
             return .string(leftVal.description + rightVal.description)
             
