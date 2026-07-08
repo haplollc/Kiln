@@ -138,6 +138,29 @@ final class KilnValidateTests: XCTestCase {
         XCTAssertFalse(v.errors.isEmpty, "an unbounded loop should be reported as runaway")
     }
 
+    // An unsupported container view (List/Form/TabView/…) parses to a dropped
+    // no-op and renders blank — the probe must call it out with a fix-it, even
+    // when a sibling view draws something (so it wouldn't read as blank).
+    func testUnsupportedContainerReported() {
+        let src = """
+        import SwiftUI
+        struct ContentView: View {
+            @State private var items = ["a", "b", "c"]
+            var body: some View {
+                VStack {
+                    Text("My List")
+                    List {
+                        ForEach(items, id: \\.self) { item in Text(item) }
+                    }
+                }
+            }
+        }
+        """
+        let v = Kiln.validate(src)
+        XCTAssertTrue(v.errors.contains(where: { $0.contains("List") }),
+                      "expected List to be flagged as unsupported; errors=\(v.errors)")
+    }
+
     // Parse-level failure still reports (no view produced).
     func testNoContentViewReported() {
         let src = "import SwiftUI\nlet x = 5"

@@ -121,15 +121,50 @@ enum KilnProbe {
              .asyncImage, .asyncImageDynamic, .asyncImagePhased:
             content += 1
 
+        // A bare function call in a VIEW position is almost always an
+        // unsupported SwiftUI container (List/Form/TabView/…): the parser turns
+        // it into a no-op call and DROPS its children, so it renders blank. Flag
+        // it explicitly with the supported replacement — otherwise it silently
+        // vanishes (and passes if any sibling drew something).
+        case .functionCall(let name, _):
+            if let fix = Self.unsupportedViewFix(name) {
+                state.reportError("`\(name)` isn't a supported view in Kiln, so it renders nothing. \(fix)")
+            } else {
+                let v = state.evaluate(node)
+                if isVisibleValue(v) { content += 1 }
+            }
+
         // Value-in-view-position (Text(score), Text(name), interpolation, etc.) —
         // evaluate; a non-empty result renders as text.
         case .variable, .binary, .propertyAccess, .subscriptAccess,
-             .methodCall, .stringInterpolation, .ternary, .valueLiteral, .functionCall:
+             .methodCall, .stringInterpolation, .ternary, .valueLiteral:
             let v = state.evaluate(node)
             if isVisibleValue(v) { content += 1 }
 
         default:
             break
+        }
+    }
+
+    /// Maps a common unsupported SwiftUI container view to its Kiln replacement,
+    /// or nil if `name` isn't a known-unsupported view. These parse to a dropped
+    /// no-op call today, so a model gets no signal without this.
+    private static func unsupportedViewFix(_ name: String) -> String? {
+        switch name {
+        case "List", "Form":
+            return "Use a `ScrollView { ForEach(items, id: \\.self) { item in … } }` instead."
+        case "Section", "Group", "GroupBox", "DisclosureGroup":
+            return "Drop it and put the child views directly in a VStack."
+        case "TabView":
+            return "Kiln has no tabs — show one screen, or make a custom tab bar from HStack + Buttons that switch a @State selection."
+        case "Picker":
+            return "Use a row of Buttons (or a Menu-free custom control) that set a @State value."
+        case "NavigationView":
+            return "Use `NavigationStack { … }` (NavigationView isn't supported)."
+        case "Menu", "DatePicker", "Stepper", "ColorPicker", "Table", "Gauge", "Grid":
+            return "It's not in Kiln's view subset — rebuild this part with VStack/HStack/ZStack/ScrollView/ForEach/Button."
+        default:
+            return nil
         }
     }
 
