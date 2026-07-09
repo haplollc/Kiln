@@ -900,6 +900,13 @@ public final class SwiftRunnerState: ObservableObject {
                case .functionDecl(_, let params, _, _, _)? = functions[key], params.isEmpty {
                 return callUserFunction(key: key, arguments: [])
             }
+            // A known-unsupported framework referenced bare (e.g. `Timer`,
+            // `HKHealthStore`) — a hard, specific error beats "used but never
+            // defined".
+            if let fix = Self.unsupportedFrameworkFix(name) {
+                reportError("`\(name)` isn't available in Kiln. \(fix)")
+                return .nil
+            }
             // `break`/`continue` legitimately reach here as bare reads; don't warn.
             if name != "break" && name != "continue" {
                 reportWarning("'\(name)' is used but never defined (declare it with @State/var/let, or check the spelling)")
@@ -2110,6 +2117,15 @@ public final class SwiftRunnerState: ObservableObject {
             return .nil
 
         default:
+            // A known-unsupported Apple framework used directly (e.g.
+            // `HKHealthStore()`, `CLLocationManager()`, `AVAudioPlayer(...)`,
+            // `Timer.scheduledTimer`) — name it with a fix-it pointing at the
+            // supported bridge, instead of silently returning a phantom .object
+            // or nil that renders blank and passes validation.
+            if let fix = Self.unsupportedFrameworkFix(name) {
+                reportError("`\(name)` isn't available in Kiln. \(fix)")
+                return .nil
+            }
             // Unknown function with labeled args → struct constructor → .object
             if arguments.contains(where: { $0.label != nil }) {
                 var dict: [String: Value] = [:]
@@ -2124,6 +2140,38 @@ public final class SwiftRunnerState: ObservableObject {
             reportWarning("function '\(name)' is not defined or supported (check the spelling, or use a value from Kiln's supported subset)")
         }
         return .nil
+    }
+
+    /// Fix-it for a well-known Apple framework Kiln can't run, or nil. Steers the
+    /// model to the supported bridge/alternative instead of a confusing generic
+    /// error. Covers the frameworks a model reaches for when a request needs a
+    /// capability Kiln doesn't have.
+    static func unsupportedFrameworkFix(_ name: String) -> String? {
+        switch name {
+        case "HKHealthStore", "HKQuery", "HKStatisticsQuery", "HKSampleQuery",
+             "HKQuantityType", "HKObserverQuery", "HealthStore", "WeatherService":
+            return "HealthKit/WeatherKit aren't available. Use clearly-labeled sample data, or fetch a public JSON API from a `.task { }` with URLSession."
+        case "CLLocationManager", "CLLocation", "CLGeocoder":
+            return "Location/GPS isn't available yet. Use a fixed coordinate or let the user type their city."
+        case "MKMapView", "MKMapItem", "MKLocalSearch":
+            return "Maps aren't available yet. Show places in a VStack/ScrollView list instead."
+        case "AVAudioPlayer", "AVAudioRecorder", "AVPlayer", "AVAudioEngine", "AVCaptureSession", "AVSpeechSynthesizer":
+            return "AV playback/recording isn't available. Use `Sound.system(1104)` for sound effects or `Speech.speak(\"…\")` for text-to-speech."
+        case "UNUserNotificationCenter", "UNMutableNotificationContent", "UNNotificationRequest":
+            return "Local notifications aren't available yet. Show an in-app reminder with a countdown using `Time.now()` and `.onTick`."
+        case "CNContactStore", "EKEventStore", "PHPickerViewController", "UIImagePickerController", "PHPhotoLibrary":
+            return "Contacts/Calendar/Photos pickers aren't available. Use text input or built-in sample data."
+        case "CMMotionManager", "CMPedometer", "CMAltimeter":
+            return "Motion/pedometer sensors aren't available yet. Use a Slider or Buttons for input."
+        case "Timer", "TimelineView", "NSTimer":
+            return "Use `.onTick(seconds) { … }` for a repeating timer — Timer/TimelineView aren't supported."
+        case "ObservableObject", "StateObject", "PassthroughSubject", "CurrentValueSubject":
+            return "Combine/ObservableObject aren't supported. Keep all state in `@State` and drive time with `.onTick`."
+        case "URLRequest":
+            return "Custom requests (headers/POST) aren't supported — only `URLSession.shared.data(from: URL(string: \"https://…\")!)` in a `.task`. Use a keyless HTTPS endpoint."
+        default:
+            return nil
+        }
     }
 
     // MARK: - Book search networking

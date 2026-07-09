@@ -139,7 +139,12 @@ enum KilnProbe {
                 state.reportError("`\(name)` isn't a supported view in Kiln, so it renders nothing. \(fix)")
             } else {
                 let v = state.evaluate(node)
-                if isVisibleValue(v) { content += 1 }
+                // Only TEXT-like results count as content. A capitalized
+                // constructor that evaluates to a phantom `.object` (an
+                // unsupported view the parser turned into a call, e.g.
+                // `Map(coordinateRegion:)`) must NOT read as rendered — otherwise
+                // a blank screen passes validation.
+                if isTextValue(v) { content += 1 }
             }
 
         // Value-in-view-position (Text(score), Text(name), interpolation, etc.) —
@@ -169,7 +174,19 @@ enum KilnProbe {
             return "Use a row of Buttons (or a Menu-free custom control) that set a @State value."
         case "NavigationView":
             return "Use `NavigationStack { … }` (NavigationView isn't supported)."
-        case "Menu", "DatePicker", "Stepper", "ColorPicker", "Table", "Gauge", "Grid":
+        case "Map":
+            return "Maps aren't available yet — show places in a VStack/ScrollView list instead."
+        case "ProgressView", "Gauge":
+            return "Draw progress yourself: a background Capsule with a narrower foreground Capsule (or a GameCanvas bar) sized from your value."
+        case "TextEditor":
+            return "Use `TextField(\"…\", text: $x)` — TextEditor isn't supported."
+        case "PhotosPicker", "ImagePicker", "Camera":
+            return "Photo/camera pickers aren't available. Use built-in sample images (Image(\"asset\")) or SF Symbols."
+        case "ShareLink":
+            return "Use a Button that calls `Share.text(\"…\")`."
+        case "VideoPlayer", "Chart":
+            return "Not supported — use BarChart([nums])/LineChart([nums]) for charts, or a GameCanvas."
+        case "Menu", "DatePicker", "Stepper", "ColorPicker", "Table", "Grid":
             return "It's not in Kiln's view subset — rebuild this part with VStack/HStack/ZStack/ScrollView/ForEach/Button."
         default:
             return nil
@@ -329,6 +346,17 @@ enum KilnProbe {
         case .nil: return false
         case .string(let s): return !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         default: return true
+        }
+    }
+
+    /// A value that renders as real TEXT — non-empty string or a number. Used for
+    /// function-call view positions so a phantom `.object`/`.array` from an
+    /// unsupported-view constructor does NOT count as visible content.
+    private static func isTextValue(_ v: Value) -> Bool {
+        switch v {
+        case .string(let s): return !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .number, .boolean: return true
+        default: return false
         }
     }
 }
