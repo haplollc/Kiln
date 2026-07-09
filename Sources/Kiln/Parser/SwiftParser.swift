@@ -1593,6 +1593,28 @@ public final class SwiftParser {
                 _ = advance() // ]
                 expr = .subscriptAccess(object: expr, index: index)
 
+            } else if case .identifier(let closureLabel) = peek().type, checkNext(.colon) {
+                // Labeled trailing closure directly after a call — e.g.
+                // `Button(action: { … }) label: { … }` (a form real models emit).
+                // The `{ … } label: { … }` form is handled in the trailing-closure
+                // branch above; this handles the `(…) label: { … }` form. Only
+                // consumes when it's actually `<label>: { … }`, else restores + stops.
+                let saved = current
+                _ = advance() // label
+                _ = advance() // :
+                skipNewlines()
+                if check(.leftBrace) {
+                    _ = advance() // {
+                    skipNewlines()
+                    let labelBody = try parseClosureBody()
+                    skipNewlines()
+                    if check(.rightBrace) { _ = advance() }
+                    expr = addLabeledTrailingClosure(to: expr, label: closureLabel, body: labelBody)
+                } else {
+                    current = saved
+                    break
+                }
+
             } else {
                 break
             }
