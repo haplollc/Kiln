@@ -57,6 +57,11 @@ public indirect enum ViewNode: Equatable {
     /// (`0..<n` / `0...n`, stored as a comparison binary).
     case forInLoop(variable: String, collection: ViewNode, body: ViewNode)
 
+    /// Statement-level `while cond { ... }` (checkFirst = true) or
+    /// `repeat { ... } while cond` (checkFirst = false). Fuel-bounded at
+    /// runtime so a non-terminating condition can't hang.
+    case whileLoop(condition: ViewNode, body: ViewNode, checkFirst: Bool)
+
     /// TextField: TextField("Placeholder", text: $name)
     /// SecureField: SecureField("Password", text: $pw) — isSecure = true
     case textField(placeholder: String, variable: String, isSecure: Bool)

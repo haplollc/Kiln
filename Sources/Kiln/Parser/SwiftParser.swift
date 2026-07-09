@@ -390,8 +390,73 @@ public final class SwiftParser {
             return try parseForInLoop()
         }
 
+        // `while cond { ... }` loop.
+        if check(.keyword(.while)) {
+            return try parseWhileLoop()
+        }
+
+        // `repeat { ... } while cond` loop. `repeat` lexes as a plain identifier.
+        if case .identifier("repeat") = peek().type, peekNext().type == .leftBrace {
+            return try parseRepeatWhile()
+        }
+
         // Expression statement
         return try parseExpression()
+    }
+
+    /// `while <cond> { <body> }` — condition checked before each iteration.
+    private func parseWhileLoop() throws -> ViewNode {
+        _ = advance() // consume `while`
+        skipNewlines()
+        // Parse the condition without letting the body `{` be eaten as a trailing
+        // closure (same guard the for-loop uses).
+        let cond = try parseConditionExpression()
+        skipNewlines()
+        let body = try parseBraceBlock()
+        return .whileLoop(condition: cond, body: body, checkFirst: true)
+    }
+
+    /// `repeat { <body> } while <cond>` — body runs once, then condition checked.
+    private func parseRepeatWhile() throws -> ViewNode {
+        _ = advance() // consume `repeat`
+        skipNewlines()
+        let body = try parseBraceBlock()
+        skipNewlines()
+        guard check(.keyword(.while)) else {
+            throw ParserError.unexpectedToken(peek(), expected: "'while'",
+                hint: "expected `while <condition>` after a `repeat { … }` block")
+        }
+        _ = advance() // consume `while`
+        // The repeat-while condition ends at the NEWLINE, not a `{` — so use the
+        // inline-condition parser, not parseConditionExpression (which skips
+        // newlines and would swallow the rest of the function).
+        let cond = try parseInlineCondition()
+        return .whileLoop(condition: cond, body: body, checkFirst: false)
+    }
+
+    /// Parse a condition that ends at a depth-0 newline / `}` / `;` / EOF (used
+    /// by `repeat … while <cond>`, whose condition isn't terminated by a `{`).
+    /// Parens/brackets are depth-tracked so a closure inside the condition —
+    /// e.g. `while snake.contains(where: { … })` — is not cut short.
+    private func parseInlineCondition() throws -> ViewNode {
+        var condTokens: [Token] = []
+        var depth = 0
+        while !isAtEnd {
+            let t = peek()
+            if depth == 0 {
+                if case .newline = t.type { break }
+                if case .rightBrace = t.type { break }
+                if case .semicolon = t.type { break }
+            }
+            if case .leftParen = t.type { depth += 1 }
+            if case .leftBracket = t.type { depth += 1 }
+            if case .rightParen = t.type { depth -= 1 }
+            if case .rightBracket = t.type { depth -= 1 }
+            condTokens.append(advance())
+        }
+        condTokens.append(Token(type: .eof))
+        let subParser = SwiftParser()
+        return try subParser.parse(condTokens)
     }
 
     /// Parse `if condition { body } else { body }`
@@ -800,6 +865,8 @@ public final class SwiftParser {
         // Plan 5: capture function members so they can be hoisted into the
         // runtime function table as `StructName.methodName`.
         var memberFuncs: [ViewNode] = []
+        // Bodies of any custom `init() { … }` — run once at setup (see below).
+        var initBodies: [ViewNode] = []
 
         while !isAtEnd {
             skipNewlines()
@@ -828,6 +895,33 @@ public final class SwiftParser {
                     continue
                 }
                 break
+            }
+
+            // Custom initializer: `init() { … }`. Kiln has no stored-property
+            // init model, but the body almost always sets up @State (e.g.
+            // `init() { placeFood() }`), so capture it and run it once at setup
+            // as an implicit onAppear. Parsing it here ALSO prevents the init
+            // body's `}` from being mistaken for the struct's closing brace —
+            // the desync that silently dropped the whole view and produced the
+            // misleading "no view produced" error.
+            if case .identifier("init") = peek().type {
+                _ = advance() // consume `init`
+                if check(.leftParen) {          // skip the parameter list
+                    _ = advance()
+                    var pd = 1
+                    while pd > 0 && !isAtEnd {
+                        if check(.leftParen) { pd += 1 }
+                        if check(.rightParen) { pd -= 1 }
+                        _ = advance()
+                    }
+                }
+                // Skip `throws` / `async` / a `?` etc. up to the body brace.
+                while !check(.leftBrace) && !check(.rightBrace) && !isAtEnd { _ = advance() }
+                if check(.leftBrace) {
+                    let initBody = try parseBraceBlock()
+                    initBodies.append(initBody)
+                }
+                continue
             }
 
             // Look for `var body` or `var previews`
@@ -965,23 +1059,37 @@ public final class SwiftParser {
             KilnLog.d("[SwiftParser] WARNING: No body/previews found in struct '\(structName)'")
         }
 
+        // Run any custom `init()` body once by attaching it to the view as an
+        // implicit `.onAppear` — this is how the interpreter initializes @State
+        // that a Swift `init` would set up (member functions are registered
+        // before onAppear fires, so `init() { placeFood() }` works).
+        if !initBodies.isEmpty, let body = bodyView {
+            let combined: ViewNode = initBodies.count == 1 ? initBodies[0] : .block(initBodies)
+            bodyView = .modified(view: body, modifiers: [.onAppear(combined)])
+        }
+
         // Store this struct for custom view support.
         // Non-state let/var properties become init parameters.
         if let body = bodyView {
             let initProps = stateProperties.compactMap { prop -> String? in
-                if case .assignment(let name, false, _) = prop { return name } // let properties = init params
+                // Only a `let` WITHOUT a default (stored as `= .nil`) is an init
+                // parameter (the caller supplies it). A `let x = <value>` is a
+                // CONSTANT — e.g. `let cellSize = 20.0` or
+                // `let gridWidth = Int(Screen.width() / cellSize)` — and must be
+                // initialized like @State, not dropped as a param.
+                if case .assignment(let name, false, .literal(.nil)) = prop { return name }
                 return nil
             }
-            // Prepend @State / optional-var initializers to the stored body
-            // as `.stateInit` nodes so that when the struct is inlined at a
-            // callsite (e.g. `BookDetailPage(book: book)` as a NavigationLink
-            // destination), its @State defaults are committed to the runtime
-            // store the first time the inlined view is realized. Init-param
-            // assignments (let properties) are excluded — those are filled in
-            // by the caller's args during inline expansion.
+            // Prepend @State / let-constant / optional-var initializers to the
+            // stored body as `.stateInit` nodes so that when the struct is
+            // inlined at a callsite (e.g. `BookDetailPage(book: book)` as a
+            // NavigationLink destination), its defaults are committed to the
+            // runtime store the first time the inlined view is realized.
+            // No-default `let` init params are excluded — those are filled in by
+            // the caller's args during inline expansion.
             let initParamSet = Set(initProps)
             let stateInits: [ViewNode] = stateProperties.compactMap { prop in
-                guard case .assignment(let name, true, let value) = prop,
+                guard case .assignment(let name, _, let value) = prop,
                       !initParamSet.contains(name) else { return nil }
                 return .stateInit(name: name, value: value)
             }

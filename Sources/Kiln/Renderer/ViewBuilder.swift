@@ -26,8 +26,8 @@ public struct DynamicViewBuilder {
 
     static func buildNode(_ node: ViewNode, state: SwiftRunnerState?) -> AnyView {
         switch node {
-        case .forInLoop:
-            // A statement-level for-loop is executed (in actions/funcs), never
+        case .forInLoop, .whileLoop:
+            // Statement-level loops are executed (in actions/funcs), never
             // rendered as a view.
             return AnyView(EmptyView())
 

@@ -73,6 +73,18 @@ public final class SwiftRunnerState: ObservableObject {
         fuelExhausted = false
     }
 
+    /// Hard per-loop iteration cap for `while`/`repeat-while`, independent of the
+    /// validation fuel budget, so a condition that never goes false can't hang a
+    /// LIVE app. Returns false (and reports) when the cap is hit.
+    private func bumpLoop(_ iters: inout Int) -> Bool {
+        iters += 1
+        if iters > 5_000_000 {
+            reportError("loop ran 5,000,000 times without ending — likely an infinite loop; make sure its condition eventually becomes false")
+            return false
+        }
+        return true
+    }
+
     @inline(__always)
     private func consumeFuel() -> Bool {
         if fuelExhausted { return false }
@@ -633,6 +645,18 @@ public final class SwiftRunnerState: ObservableObject {
                     if ctrl == .breakLoop { break }
                 }
             }
+        case .whileLoop(let cond, let body, let checkFirst):
+            var iters = 0
+            while true {
+                if fuelExhausted || !bumpLoop(&iters) { break }
+                if checkFirst && !evaluate(cond).isTruthy { break }
+                try executeWithReturn(body)
+                if let ctrl = loopControl {
+                    loopControl = nil
+                    if ctrl == .breakLoop { break }
+                }
+                if !checkFirst && !evaluate(cond).isTruthy { break }
+            }
         default:
             execute(node)
         }
@@ -715,6 +739,22 @@ public final class SwiftRunnerState: ObservableObject {
                     loopControl = nil
                     if ctrl == .breakLoop { break }   // continue: fall through to next item
                 }
+            }
+
+        // `while cond { … }` / `repeat { … } while cond`. Capped so a
+        // non-terminating condition can't hang the app even in a live run
+        // (where the validation fuel budget isn't armed).
+        case .whileLoop(let cond, let body, let checkFirst):
+            var iters = 0
+            while true {
+                if fuelExhausted || !bumpLoop(&iters) { break }
+                if checkFirst && !evaluate(cond).isTruthy { break }
+                execute(body)
+                if let ctrl = loopControl {
+                    loopControl = nil
+                    if ctrl == .breakLoop { break }
+                }
+                if !checkFirst && !evaluate(cond).isTruthy { break }
             }
 
         // Handle assignment to expression (e.g., requirements[0].isMet = value)

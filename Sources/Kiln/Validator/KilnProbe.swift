@@ -33,8 +33,16 @@ enum KilnProbe {
     static func exercise(ast: ViewNode, state: SwiftRunnerState, ticks: Int) -> Bool {
         var content = 0
 
-        // 1) Fire onAppear first — many apps (especially games) initialize their
-        //    @State here, and shapes/rows depend on it.
+        // 0) Real render pass FIRST — this is what SwiftUI's initial buildNode
+        //    does before onAppear fires: it commits @State/stateInit defaults and
+        //    freezes runtime constants like `let gridWidth = Int(Screen.width()/…)`
+        //    into the store. Doing this before onAppear means an init/onAppear
+        //    body that reads those constants (e.g. `placeFood()` using gridWidth)
+        //    sees real values, matching the live app's ordering.
+        _ = DynamicViewBuilder.build(ast, state: state)
+
+        // 1) Fire onAppear — many apps (especially games) initialize their @State
+        //    here, and shapes/rows depend on it.
         fireLifecycle(ast, state: state)
 
         // 2) Eager render pass: evaluate what the renderer would, counting content.
