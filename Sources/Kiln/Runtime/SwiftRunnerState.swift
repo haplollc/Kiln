@@ -1609,6 +1609,10 @@ public final class SwiftRunnerState: ObservableObject {
             return .number(Double(arr.count))
         case (.array(let arr), "isEmpty"):
             return .boolean(arr.isEmpty)
+        case (.array(let arr), "enumerated"):
+            // for (i, item) in arr.enumerated() — pairs destructure positionally
+            // via bindLoopVariable ("i,item").
+            return .array(arr.enumerated().map { .array([.number(Double($0.offset)), $0.element]) })
         case (.array(let arr), "contains"):
             if let arg = args.first {
                 let target = evaluate(arg.value)
@@ -1757,7 +1761,30 @@ public final class SwiftRunnerState: ObservableObject {
             return .number(n.rounded())
 
         default:
+            // A mutation method on a DICTIONARY is almost always "meant an array
+            // of dictionaries" — e.g. `var shapes = ["type": …]` (single dict,
+            // missing outer brackets) then `shapes.append(brick)`. Without this,
+            // the append silently no-ops and the app renders a blank canvas with
+            // zero clues (a real model failure mode).
+            if case .object = obj,
+               ["append", "insert", "remove", "removeLast", "removeFirst", "removeAll"].contains(method) {
+                reportError("'.\(method)' was called on a DICTIONARY, not an array. If this should be a list of shape dictionaries, initialize it with DOUBLE brackets — `var shapes = [[\"type\": \"rect\", …]]` — so it's an array you can append to.")
+            } else {
+                reportWarning("method '.\(method)' isn't available on this \(kindName(obj)) value")
+            }
             return .nil
+        }
+    }
+
+    /// Human-readable kind for diagnostics.
+    private func kindName(_ v: Value) -> String {
+        switch v {
+        case .number: return "number"
+        case .string: return "string"
+        case .boolean: return "boolean"
+        case .array: return "array"
+        case .object: return "dictionary"
+        case .nil: return "nil"
         }
     }
 
