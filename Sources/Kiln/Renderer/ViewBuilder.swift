@@ -24,6 +24,23 @@ public struct DynamicViewBuilder {
 
     // MARK: - Core Builder
 
+    /// SwiftUI lets you write `let x = …` (and assignments) inline among a
+    /// container's children; sibling views read them. Kiln parses those as
+    /// statement nodes mixed into the child list, so execute them at build time
+    /// (→ renderVariables) before the child views are realized — otherwise a
+    /// `Text("$\(tip)")` after `let tip = …` sees an undefined name.
+    static func bindInlineBindings(_ children: [ViewNode], state: SwiftRunnerState?) {
+        guard let state = state else { return }
+        for child in children {
+            switch child {
+            case .assignment, .compoundAssignment, .propertyAssignment, .tupleBinding:
+                state.execute(child)
+            default:
+                break
+            }
+        }
+    }
+
     static func buildNode(_ node: ViewNode, state: SwiftRunnerState?) -> AnyView {
         switch node {
         case .forInLoop, .whileLoop:
@@ -52,6 +69,7 @@ public struct DynamicViewBuilder {
             )
 
         case .vStack(let spacing, let alignment, let children):
+            bindInlineBindings(children, state: state)
             return AnyView(
                 VStack(alignment: mapAlignment(alignment), spacing: spacing.map { CGFloat($0) }) {
                     ForEach(Array(children.enumerated()), id: \.offset) { _, child in
@@ -61,6 +79,7 @@ public struct DynamicViewBuilder {
             )
 
         case .hStack(let spacing, let alignment, let children):
+            bindInlineBindings(children, state: state)
             return AnyView(
                 HStack(alignment: mapVerticalAlignment(alignment), spacing: spacing.map { CGFloat($0) }) {
                     ForEach(Array(children.enumerated()), id: \.offset) { _, child in
@@ -70,6 +89,7 @@ public struct DynamicViewBuilder {
             )
 
         case .zStack(let alignment, let children):
+            bindInlineBindings(children, state: state)
             return AnyView(
                 ZStack(alignment: mapZAlignment(alignment)) {
                     ForEach(Array(children.enumerated()), id: \.offset) { _, child in
