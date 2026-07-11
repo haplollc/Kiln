@@ -2050,6 +2050,25 @@ public final class SwiftParser {
             let shapes = arguments.first?.value ?? .arrayLiteral([])
             return .gameCanvas(shapes: shapes)
 
+        case "Map":
+            // Real MapKit map: Map(latitude:longitude:span:markers:showsUserLocation:).
+            // Every argument is optional; markers may also be the first positional.
+            func mapArg(_ labels: [String]) -> ViewNode? {
+                for l in labels {
+                    if let a = arguments.first(where: { $0.label == l }) { return a.value }
+                }
+                return nil
+            }
+            let lat = mapArg(["latitude", "lat"])
+            let lng = mapArg(["longitude", "lng", "lon", "long"])
+            let span = mapArg(["span", "zoom", "delta", "radius"])
+            var markers = mapArg(["markers", "pins", "annotations", "places", "locations"])
+            if markers == nil, let first = arguments.first, first.label == nil { markers = first.value }
+            var showsUser = false
+            if let u = mapArg(["showsUserLocation", "userLocation", "showsUser", "showUser"]),
+               case .literal(.boolean(let b)) = u { showsUser = b }
+            return .map(latitude: lat, longitude: lng, span: span, markers: markers, showsUser: showsUser)
+
         case "ForEach":
             // Parse range argument: ForEach(0..<5) or ForEach(1...10)
             if let firstArg = arguments.first?.value {

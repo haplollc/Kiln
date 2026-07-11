@@ -2179,9 +2179,9 @@ public final class SwiftRunnerState: ObservableObject {
              "HKQuantityType", "HKObserverQuery", "HealthStore", "WeatherService":
             return "HealthKit/WeatherKit aren't available. Use clearly-labeled sample data, or fetch a public JSON API from a `.task { }` with URLSession."
         case "CLLocationManager", "CLLocation", "CLGeocoder":
-            return "Location/GPS isn't available yet. Use a fixed coordinate or let the user type their city."
+            return "Don't use CoreLocation directly. Call `Location.request()` once, then read `Location.here()` → {lat,lng} (empty until ready) — poll it from `.onTick`."
         case "MKMapView", "MKMapItem", "MKLocalSearch":
-            return "Maps aren't available yet. Show places in a VStack/ScrollView list instead."
+            return "Use the built-in `Map(latitude:longitude:span:markers:)` view instead of MapKit types directly. markers is an array of [\"lat\":…,\"lng\":…,\"title\":\"…\"]."
         case "AVAudioPlayer", "AVAudioRecorder", "AVPlayer", "AVAudioEngine", "AVCaptureSession", "AVSpeechSynthesizer":
             return "AV playback/recording isn't available. Use `Sound.system(1104)` for sound effects or `Speech.speak(\"…\")` for text-to-speech."
         case "UNUserNotificationCenter", "UNMutableNotificationContent", "UNNotificationRequest":

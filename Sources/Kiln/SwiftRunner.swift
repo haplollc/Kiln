@@ -553,7 +553,7 @@ public final class SwiftRunner: ObservableObject {
              .forEachCollection,
              .navigationStack, .navigationLink,
              .lazyVGrid, .lazyHGrid, .geometryReader, .linearGradient,
-             .asyncImagePhased, .gridItem, .chart, .gameCanvas:
+             .asyncImagePhased, .gridItem, .chart, .gameCanvas, .map:
             return true
 
         case .block(let statements):

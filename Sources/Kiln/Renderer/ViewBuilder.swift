@@ -520,6 +520,18 @@ public struct DynamicViewBuilder {
             if case .array(let a)? = state?.evaluate(shapes) { items = a }
             return AnyView(KilnGameCanvas(shapes: items))
 
+        case .map(let latN, let lngN, let spanN, let markersN, let showsUser):
+            func num(_ n: ViewNode?) -> Double? {
+                guard let n, case .number(let d)? = state?.evaluate(n) else { return nil }
+                return d
+            }
+            var markerValues: [Value] = []
+            if let markersN, case .array(let a)? = state?.evaluate(markersN) { markerValues = a }
+            let markers = DynamicViewBuilder.mapMarkers(from: markerValues)
+            return AnyView(KilnMapView(
+                centerLat: num(latN), centerLng: num(lngN), span: num(spanN),
+                markers: markers, showsUser: showsUser))
+
         // MARK: Plan 8 — phased AsyncImage
         case .asyncImagePhased(let urlExpression, let emptyBranch, let successBranch, let failureBranch, let imageBinding):
             return AnyView(buildPhasedAsyncImage(

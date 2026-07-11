@@ -114,6 +114,12 @@ enum KilnProbe {
         case .chart(_, let data):
             if !arrayValue(state.evaluate(data)).isEmpty { content += 1 }
 
+        // A Map always draws the map surface — real content on its own, plus one
+        // per resolved marker.
+        case .map(_, _, _, let markers, _):
+            content += 1
+            if let markers, case .array(let m) = state.evaluate(markers) { content += m.count }
+
         // Buttons — the label is visible content; the action is fired later.
         case .button(let label, _):
             walkRender(label, state: state, content: &content)
@@ -174,8 +180,6 @@ enum KilnProbe {
             return "Use a row of Buttons (or a Menu-free custom control) that set a @State value."
         case "NavigationView":
             return "Use `NavigationStack { … }` (NavigationView isn't supported)."
-        case "Map":
-            return "Maps aren't available yet — show places in a VStack/ScrollView list instead."
         case "ProgressView", "Gauge":
             return "Draw progress yourself: a background Capsule with a narrower foreground Capsule (or a GameCanvas bar) sized from your value."
         case "TextEditor":

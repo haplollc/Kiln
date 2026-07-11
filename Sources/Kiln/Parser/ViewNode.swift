@@ -232,6 +232,16 @@ public indirect enum ViewNode: Equatable {
     /// for input — this is how native (Kiln) games are built.
     case gameCanvas(shapes: ViewNode)
 
+    /// `Map(latitude:longitude:span:markers:showsUserLocation:)` — a real MapKit
+    /// map. `latitude`/`longitude` center it (degrees), `span` is the zoom in
+    /// degrees (smaller = closer, default ~0.05). `markers` evaluates to an array
+    /// of objects `["lat": …, "lng": …, "title": "…", "color": "red"]`. Set
+    /// `showsUserLocation: true` to drop the blue user dot (needs the location
+    /// permission). Any argument may be omitted; with only markers, the map fits
+    /// them. All are ViewNodes evaluated at render so the map stays live.
+    case map(latitude: ViewNode?, longitude: ViewNode?, span: ViewNode?,
+             markers: ViewNode?, showsUser: Bool)
+
     /// AsyncImage(url: ...) { phase in switch phase { case .empty: ... } }
     /// Holds per-phase view branches. Success branch's `imageBinding` names the
     /// local binding (e.g. `image` in `.success(let image)`).
