@@ -55,7 +55,7 @@ public struct DynamicViewBuilder {
             return AnyView(Image(systemName: name))
 
         case .assetImage(let name):
-            return AnyView(Image(name))
+            return AnyView(Kiln.hostImageProvider?(name) ?? Image(name))
 
         case .button(let label, let action):
             return AnyView(
@@ -1002,7 +1002,7 @@ public struct DynamicViewBuilder {
             if fill { return AnyView(img.scaledToFill()) }
             return AnyView(img)
         case .assetImage(let name):
-            let img = Image(name).resizable()
+            let img = (Kiln.hostImageProvider?(name) ?? Image(name)).resizable()
             if fit { return AnyView(img.scaledToFit()) }
             if fill { return AnyView(img.scaledToFill()) }
             return AnyView(img)

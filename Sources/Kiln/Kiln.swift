@@ -40,6 +40,12 @@ public enum KilnLog {
 /// }
 /// ```
 public enum Kiln {
+    /// Host hook that resolves an `Image("name")` to a runtime SwiftUI image the
+    /// host holds (e.g. a photo the user just picked, keyed by a token string).
+    /// Returns nil to fall through to the normal asset-catalog lookup. The host
+    /// returns a SwiftUI `Image` (not a UIImage) so Kiln stays platform-neutral.
+    @MainActor public static var hostImageProvider: ((String) -> Image?)?
+
     /// Parse, evaluate, and render a Swift source string. Returns a
     /// `KilnResult` containing the rendered view (when the source produced
     /// one), any `print(...)` output, and any errors raised during parsing
