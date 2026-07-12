@@ -51,6 +51,14 @@ enum KilnProbe {
         // If we already blew the budget, stop — the error is recorded.
         guard !state.fuelExhausted else { return content > 0 }
 
+        // Frozen-animation guard: a GameCanvas app with an `.onTick` loop MUST
+        // change what it draws when the loop runs. Snapshot the canvas shapes
+        // before firing interactions, so we can compare after. (Only for games:
+        // apps without a GameCanvas + onTick are legitimately static.)
+        let shapesExpr = ticks > 0 ? firstGameCanvasShapes(ast) : nil
+        let animates = shapesExpr != nil && containsOnTick(ast)
+        let before = animates ? shapesSnapshot(shapesExpr!, state) : nil
+
         // 3) Interaction pass: tap / swipe / tick the app so input handlers run
         //    (these catch bugs that only fire on touch — e.g. a handler that
         //    reads an undefined var or divides by zero).
@@ -62,7 +70,67 @@ enum KilnProbe {
             walkRender(ast, state: state, content: &content)
         }
 
+        // If the game drew something but NOTHING on the canvas moved after all the
+        // ticks + input, it's frozen — almost always a moving entity that starts
+        // nil/empty and is never spawned. Fail with an actionable message.
+        if animates, let before, !state.fuelExhausted {
+            let after = shapesSnapshot(shapesExpr!, state)
+            if before == after, !before.isEmpty, before != "[]" {
+                state.reportError("This game has an .onTick loop but nothing on the GameCanvas changes when it runs — the screen looks frozen. Usually a moving entity (piece/ball/player) starts nil or as an empty array and is never spawned, so onTick mutates state that nothing draws. Give it a real initial value in its @State, or spawn it in .onAppear, so it's drawn and moving from the first frame.")
+            }
+        }
+
         return content > 0
+    }
+
+    /// Serializes the evaluated GameCanvas shapes for a before/after comparison.
+    private static func shapesSnapshot(_ shapesExpr: ViewNode, _ state: SwiftRunnerState) -> String {
+        state.evaluate(shapesExpr).description
+    }
+
+    /// The shapes expression of the first `GameCanvas(...)` in the tree, or nil.
+    private static func firstGameCanvasShapes(_ node: ViewNode) -> ViewNode? {
+        switch node {
+        case .gameCanvas(let shapes):
+            return shapes
+        case .modified(let view, _):
+            return firstGameCanvasShapes(view)
+        case .vStack(_, _, let children), .hStack(_, _, let children),
+             .zStack(_, let children), .navigationStack(let children):
+            for c in children { if let s = firstGameCanvasShapes(c) { return s } }
+            return nil
+        case .scrollView(_, _, let inner), .lazyVGrid(_, _, let inner),
+             .lazyHGrid(_, _, let inner), .geometryReader(_, let inner):
+            return firstGameCanvasShapes(inner)
+        case .block(let stmts):
+            for s in stmts { if let r = firstGameCanvasShapes(s) { return r } }
+            return nil
+        case .conditional(_, let thenBody, let elseBody):
+            return firstGameCanvasShapes(thenBody) ?? elseBody.flatMap(firstGameCanvasShapes)
+        default:
+            return nil
+        }
+    }
+
+    /// True if any `.onTick` modifier is registered anywhere in the tree.
+    private static func containsOnTick(_ node: ViewNode) -> Bool {
+        switch node {
+        case .modified(let view, let modifiers):
+            if modifiers.contains(where: { if case .onTick = $0 { return true }; return false }) { return true }
+            return containsOnTick(view)
+        case .vStack(_, _, let children), .hStack(_, _, let children),
+             .zStack(_, let children), .navigationStack(let children):
+            return children.contains(where: containsOnTick)
+        case .scrollView(_, _, let inner), .lazyVGrid(_, _, let inner),
+             .lazyHGrid(_, _, let inner), .geometryReader(_, let inner):
+            return containsOnTick(inner)
+        case .block(let stmts):
+            return stmts.contains(where: containsOnTick)
+        case .conditional(_, let thenBody, let elseBody):
+            return containsOnTick(thenBody) || (elseBody.map(containsOnTick) ?? false)
+        default:
+            return false
+        }
     }
 
     // MARK: - Render walk (eager expression evaluation + content detection)
