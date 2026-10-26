@@ -1,0 +1,54 @@
+name: KilnLab
+options:
+  bundleIdPrefix: com.haplo.kilnlab
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  Kiln:
+    path: ..
+targets:
+  KilnLab:
+    type: application
+    platform: iOS
+    sources:
+      - path: KilnLab
+      - path: ../Examples/Apps
+        type: folder
+        buildPhase: resources
+      - path: ../Examples/AppleIntelligence
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: Kiln
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.haplo.kilnlab
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Kiln Lab
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: NO
+  KilnLabUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: KilnLabUITests
+    dependencies:
+      - target: KilnLab
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: NO
+        TEST_TARGET_NAME: KilnLab
+schemes:
+  KilnLab:
+    build:
+      targets:
+        KilnLab: all
+        KilnLabUITests: [test]
+    test:
+      targets:
+        - KilnLabUITests

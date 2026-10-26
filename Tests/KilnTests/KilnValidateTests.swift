@@ -156,9 +156,9 @@ final class KilnValidateTests: XCTestCase {
             }
         }
         """
+        // The modern engine renders List with real SwiftUI (it used to be flagged).
         let v = Kiln.validate(src)
-        XCTAssertTrue(v.errors.contains(where: { $0.contains("List") }),
-                      "expected List to be flagged as unsupported; errors=\(v.errors)")
+        XCTAssertTrue(v.isValid, "List should validate cleanly now; errors=\(v.errors)")
     }
 
     // Parse-level failure still reports (no view produced).

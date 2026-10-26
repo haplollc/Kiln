@@ -55,6 +55,10 @@ public enum Kiln {
     /// No compilation step is involved — this is pure interpretation.
     @MainActor
     public static func run(_ code: String) -> KilnResult {
+        // The original interpreter only runs its guided dialect (GameCanvas, onTick,
+        // Storage …); everything else goes to the modern engine, whose errors are
+        // clearer and which never loops forever on code it can't read.
+        if engine != .legacy, let result = KilnEngine.run(code) { return result }
         let raw = SwiftRunner.shared.run(code)
         return KilnResult(
             view: raw.view,
@@ -62,6 +66,19 @@ public enum Kiln {
             errors: raw.errors
         )
     }
+
+    /// Which interpreter runs code. `.automatic` (the default) uses the modern
+    /// engine — full Swift types, closures, SwiftUI state and controls — and
+    /// hands code written in the original interpreter's guided dialect
+    /// (GameCanvas, onTick, Storage …) to the original interpreter.
+    public enum Engine: Sendable { case automatic, modern, legacy }
+    @MainActor public static var engine: Engine = .automatic
+
+    /// Seeds `shuffled()`, `randomElement()`, `Int.random(in:)` and friends in
+    /// code run after it is set, so a run can be repeated exactly. nil (the
+    /// default) uses the system's random numbers. Native code gets the same
+    /// numbers from `KilnRandom(seed:)` with the same seed.
+    @MainActor public static var randomSeed: UInt64?
 
     /// Validate Swift source the way a real render + a burst of user input would,
     /// WITHOUT mounting a live SwiftUI view. Unlike `run`, which only constructs
@@ -83,12 +100,82 @@ public enum Kiln {
     ///   and whether visible content was produced.
     @MainActor
     public static func validate(_ code: String, ticks: Int = 8, fuel: Int = 2_000_000) -> KilnValidation {
-        SwiftRunner.shared.probe(code, ticks: ticks, fuel: fuel)
+        if engine != .legacy, let v = KilnEngine.validate(code, ticks: ticks, fuel: fuel) { return v }
+        return SwiftRunner.shared.probe(code, ticks: ticks, fuel: fuel)
+    }
+
+    /// The Swift a chat reply contains, ready to run: every ```swift block in
+    /// order, joined. Models often split one app across blocks (the model type in
+    /// one, the view in the next); a later block that redeclares a type replaces
+    /// the earlier one. Returns "" when the reply has no Swift blocks.
+    public static func swiftSource(fromMarkdown markdown: String) -> String {
+        swiftBlocks(in: markdown).joined(separator: "\n\n")
+    }
+
+    /// What to run when a person taps Run on one code block of a reply: that
+    /// block, preceded by any other blocks of the same reply that declare types
+    /// it uses but doesn't define (models often put `struct Habit` in one block
+    /// and the view in the next). Alternative versions of the same view in other
+    /// blocks are left out, so the tapped one is what runs.
+    public static func swiftSource(running block: String, inReply markdown: String) -> String {
+        let blocks = swiftBlocks(in: markdown)
+        guard blocks.count > 1 else { return block }
+        func declared(_ code: String) -> Set<String> {
+            let pattern = #"(?:struct|class|enum|protocol|actor|typealias)\s+([A-Z][A-Za-z0-9_]*)"#
+            guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
+            let ns = code as NSString
+            return Set(re.matches(in: code, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) })
+        }
+        func referenced(_ code: String) -> Set<String> {
+            guard let re = try? NSRegularExpression(pattern: #"\b([A-Z][A-Za-z0-9_]*)\b"#) else { return [] }
+            let ns = code as NSString
+            return Set(re.matches(in: code, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) })
+        }
+        var included: [String] = []
+        var have = declared(block)
+        var needed = referenced(block).subtracting(have)
+        var changed = true
+        while changed {
+            changed = false
+            for other in blocks where other != block && !included.contains(other) {
+                let provides = declared(other)
+                if !provides.isDisjoint(with: needed) {
+                    included.append(other)
+                    have.formUnion(provides)
+                    needed = needed.union(referenced(other)).subtracting(have)
+                    changed = true
+                }
+            }
+        }
+        return (included + [block]).joined(separator: "\n\n")
+    }
+
+    static func swiftBlocks(in markdown: String) -> [String] {
+        var blocks: [String] = []
+        var current: [String]? = nil
+        for line in markdown.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if current == nil {
+                if trimmed.hasPrefix("```"), trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("swift") { current = [] }
+                continue
+            }
+            if trimmed.hasPrefix("```") { blocks.append(current!.joined(separator: "\n")); current = nil; continue }
+            current?.append(line)
+        }
+        if let open = current { blocks.append(open.joined(separator: "\n")) }
+        return blocks
+    }
+
+    /// Whether code reads as a whole app screen (navigation, lists, forms, tabs)
+    /// rather than a small view, so a host can give it the full screen.
+    public static func looksLikeApp(_ code: String) -> Bool {
+        ["NavigationStack", "NavigationView", "NavigationSplitView", "List {", "List(", "Form {", "TabView", "ScrollView", ".toolbar"]
+            .contains { code.contains($0) }
     }
 
     /// Convenience flag: returns the latest known version of the Kiln
     /// public API. Bumped on breaking changes.
-    public static let version: String = "0.1.0"
+    public static let version: String = "0.2.0"
 
     // MARK: - Native bridges (host capabilities)
 

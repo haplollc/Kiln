@@ -9,3 +9,7 @@ xcuserdata/
 *.xcuserstate
 .idea/
 .vscode/
+Lab/.build-quick/
+Lab/.sim-udid
+Lab/KilnLab.xcodeproj/
+Lab/KilnLab/Native/
