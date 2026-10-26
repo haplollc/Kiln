@@ -9,6 +9,7 @@
 [![SPM](https://img.shields.io/badge/SPM-compatible-brightgreen.svg)](https://swift.org/package-manager/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-306%20passing-success.svg)](Tests/KilnTests)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/jcbuilds)
 
 [**Demo**](Resources/demo.mp4) — paste real Swift into your app, see it run.
 
