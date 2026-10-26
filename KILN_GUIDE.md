@@ -1,5 +1,10 @@
 # Kiln — how it works & how to generate code for it
 
+> Since 0.2.0 Kiln runs standard Swift and SwiftUI (structs, classes, enums,
+> `List`, `Form`, navigation, sheets, networking …) on its second engine; see
+> STATUS.md. This guide describes the original interpreter's guided dialect
+> (`GameCanvas`, `.onTick`, `Storage`), which Kiln still runs for code that uses it.
+
 Kiln is a **Swift/SwiftUI interpreter** that runs source code at runtime (no
 compilation). It renders **real SwiftUI views** from a **subset** of Swift. Bond
 uses it as the "native" runtime: a generated `Main.swift` is interpreted and
