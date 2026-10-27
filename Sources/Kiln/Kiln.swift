@@ -77,8 +77,9 @@ public enum Kiln {
     /// Seeds `shuffled()`, `randomElement()`, `Int.random(in:)` and friends in
     /// code run after it is set, so a run can be repeated exactly. nil (the
     /// default) uses the system's random numbers. Native code gets the same
-    /// numbers from `KilnRandom(seed:)` with the same seed.
-    @MainActor public static var randomSeed: UInt64?
+    /// numbers from `KilnRandom(seed:)` with the same seed. A host app
+    /// launched with `-KilnRandomSeed N` (a UI test, a demo) starts seeded.
+    @MainActor public static var randomSeed: UInt64? = UserDefaults.standard.string(forKey: "KilnRandomSeed").flatMap { UInt64($0) }
 
     /// Validate Swift source the way a real render + a burst of user input would,
     /// WITHOUT mounting a live SwiftUI view. Unlike `run`, which only constructs
@@ -166,11 +167,12 @@ public enum Kiln {
         return blocks
     }
 
-    /// Whether code reads as a whole app screen (navigation, lists, forms, tabs)
-    /// rather than a small view, so a host can give it the full screen.
+    /// Whether code reads as a whole app screen (navigation, lists, forms, tabs,
+    /// or simply a program of 50 lines or more) rather than a small view, so a
+    /// host can give it the full screen.
     public static func looksLikeApp(_ code: String) -> Bool {
         ["NavigationStack", "NavigationView", "NavigationSplitView", "List {", "List(", "Form {", "TabView", "ScrollView", ".toolbar"]
-            .contains { code.contains($0) }
+            .contains { code.contains($0) } || code.split(separator: "\n", omittingEmptySubsequences: true).count >= 50
     }
 
     /// Convenience flag: returns the latest known version of the Kiln

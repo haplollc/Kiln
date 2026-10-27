@@ -1,14 +1,21 @@
-<div align="center">
+<p align="center">
+  <img src="assets/banner.gif" width="864" alt="Three iPhones running apps Kiln built from chat replies in Haplo AI: a habit tracker, an expense tracker with a chart, and a memory game">
+</p>
 
-# 🔥 Kiln
+<h1 align="center">Kiln</h1>
 
-### A live Swift / SwiftUI interpreter you can embed in any iOS or macOS app.
+<p align="center">
+  Run SwiftUI from a string, on device. Real views, real state, no compiler.<br />
+  It is the Run button on Swift code in <a href="https://haploapp.com">Haplo AI</a>: ask for an app, tap Run, use it.
+</p>
 
-[![Swift](https://img.shields.io/badge/Swift-5.9+-orange.svg)](https://swift.org)
-[![Platforms](https://img.shields.io/badge/platforms-iOS%2017+%20|%20macOS%2014+%20|%20visionOS-blue.svg)](https://swift.org)
-[![SPM](https://img.shields.io/badge/SPM-compatible-brightgreen.svg)](https://swift.org/package-manager/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-306%20passing-success.svg)](Tests/KilnTests)
+<p align="center">
+  <img src="https://img.shields.io/badge/Swift-5.9+-F05138?logo=swift&logoColor=white" alt="Swift 5.9+" />
+  <img src="https://img.shields.io/badge/iOS-17+-000000?logo=apple&logoColor=white" alt="iOS 17+" />
+  <img src="https://img.shields.io/badge/macOS-14+-000000?logo=apple&logoColor=white" alt="macOS 14+" />
+  <img src="https://img.shields.io/badge/SPM-compatible-brightgreen" alt="Swift Package Manager" />
+  <img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License" />
+</p>
 
 <p align="center">
   <a href="https://buymeacoffee.com/jcbuilds"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="200"></a>
@@ -16,62 +23,46 @@
   <sub>If Kiln is useful to you, a coffee keeps it going.</sub>
 </p>
 
-[**Demo**](Resources/demo.mp4) — paste real Swift into your app, see it run.
-
-<a href="Resources/demo.mp4">
-  <img src="Resources/demo-poster.jpg" width="320" alt="Kiln demo" />
-</a>
-
-</div>
-
 ---
-
-## What is Kiln?
-
-Kiln parses, evaluates, and renders Swift source code at runtime — no compiler involved. You give it a string of Swift; it gives you back a real `SwiftUI` view.
-
-It's the engine behind the live-preview feature in [Haplo](https://haplo.app) and is now standalone for anyone who wants to ship a code playground, AI-generated UI, in-app templates, or a SwiftUI tutorial app.
 
 ```swift
-import Kiln
-
-let result = Kiln.run("""
-struct ContentView: View {
-    @State var count = 0
-    var body: some View {
-        VStack {
-            Text("Tapped \\(count) times")
-            Button("Tap me") { count += 1 }
-        }
-    }
-}
-""")
-
-// result.view is an AnyView you can drop anywhere.
+let result = Kiln.run(source)   // result.view is a live SwiftUI view
 ```
 
----
+Kiln parses Swift source at runtime and interprets it: structs, classes, enums, closures and the rest of the language, with every `View` you write hosted by a real SwiftUI view that owns its own `@State`. Lists, forms, pickers, sheets, navigation, timers and charts are the real SwiftUI controls, so an app a model writes in a chat reply runs on the phone a moment later and behaves the way it would if you compiled it.
 
-## Install
+**[Download the demo video (MP4)](assets/demo.mp4)**
 
-Add to your `Package.swift`:
+## What it looks like
+
+| A habit tracker | An expense tracker | A memory game |
+|:---:|:---:|:---:|
+| <img src="assets/habits.gif" width="260" alt="Asked for a habit tracker, the reply's code runs in Kiln: habits are checked off, the ring fills and a new habit is added"> | <img src="assets/expenses.gif" width="260" alt="Asked for an expense tracker, the reply's code runs in Kiln: a $12 lunch is added in a sheet and the total and chart update"> | <img src="assets/memory.gif" width="260" alt="Asked for a memory game, the reply's code runs in Kiln and the game is played to a win"> |
+| A `List` with sections and a progress ring that fills as habits are checked off. | Swift Charts, a sheet with a form, and a section per category. | A grid of flipping cards, a move counter and a win message. |
+
+<sub>Staged demos, recorded in the iOS Simulator inside <a href="https://haploapp.com">Haplo AI</a>. The model's replies are scripted so every take has the same code (each is one of the apps in <a href="Examples/Apps">Examples/Apps</a>); tapping Run, the sheet and the app Kiln runs from that code are real, and the taps come from a UI test.</sub>
+
+## Installation
+
+In Xcode: **File > Add Package Dependencies** and paste
+
+```
+https://github.com/haplollc/Kiln
+```
+
+Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/haplollc/Kiln.git", from: "0.1.0"),
-],
-targets: [
-    .target(name: "MyApp", dependencies: ["Kiln"]),
+    .package(url: "https://github.com/haplollc/Kiln", from: "0.2.0")
 ]
 ```
 
-Or in Xcode: **File ▸ Add Package Dependencies…** → `https://github.com/haplollc/Kiln`
-
----
+Then add `Kiln` to your target's dependencies.
 
 ## Quick start
 
-Drop `KilnView` into any SwiftUI view tree. It re-runs every time the `code` string changes.
+`KilnView` runs whatever source you give it and re-runs when it changes.
 
 ```swift
 import SwiftUI
@@ -79,139 +70,103 @@ import Kiln
 
 struct Playground: View {
     @State private var source = """
-    struct Demo: View {
-        var body: some View { Text("hello, kiln") }
+    struct ContentView: View {
+        @State private var count = 0
+        var body: some View {
+            Button("Tapped \\(count) times") { count += 1 }
+        }
     }
     """
 
     var body: some View {
-        VSplitView {
-            TextEditor(text: $source).font(.system(.body, design: .monospaced))
+        VStack {
+            TextEditor(text: $source).font(.body.monospaced())
             KilnView(code: source)
         }
     }
 }
 ```
 
-That's it. Type Swift on the left, see the rendered view on the right.
+Kiln shows `ContentView` if there is one; otherwise an `@main App`, a `#Preview`, a `PreviewProvider`, or the view no other view uses.
 
----
+## Running code from a chat reply
 
-## What's supported
+Models often split one app across several code blocks (the model type in one, the view in the next). Kiln has helpers for exactly that:
 
-| Area | Status |
-|------|--------|
-| Structs (incl. `View` conformance + `@State`, `@Binding`) | ✅ |
-| Computed view properties (`var body`, `var x: some View`) | ✅ |
-| Forward references (using a type defined later in the file) | ✅ |
-| `if` / `else if` / `else` (incl. `if let`, multi-clause `if let A, B`) | ✅ |
-| `switch` with enum-case matching | ✅ |
-| `guard`, `guard let`, multi-clause `guard A, B else` | ✅ |
-| `for`-in, `while`, `defer`, `do`/`catch`, `throw`, `try` / `try?` / `try!` | ✅ |
-| `async` / `await`, `Task { }`, SwiftUI `.task` modifier | ✅ |
-| Closures, trailing closures, `$0` shorthand, labeled trailing closures | ✅ |
-| `let x: T?` deferred initialization | ✅ |
-| Enums with associated values + member functions | ✅ |
-| Extensions (member functions) | ✅ |
-| SwiftUI: `VStack` / `HStack` / `ZStack` / `ScrollView` / `LazyVGrid` / `LazyHGrid` | ✅ |
-| SwiftUI: `NavigationStack` / `NavigationLink` with closure destinations | ✅ |
-| SwiftUI: `AsyncImage` with `switch phase` branches | ✅ |
-| SwiftUI: `ForEach`, `ForEach(_, id:)`, `Identifiable` rows | ✅ |
-| Foundation: `URL`, `URLSession.shared.data(from:)`, `URLComponents`, `URLQueryItem` | ✅ |
-| `JSONDecoder().decode(T.self, from:)` with auto-schema tagging | ✅ |
-| Per-instance `@State` scoping across `NavigationLink` pushes | ✅ |
-| `print(...)` capture into `KilnResult.consoleOutput` | ✅ |
+```swift
+// Everything in the reply, in order; a later block that redeclares a type replaces it.
+let source = Kiln.swiftSource(fromMarkdown: reply)
 
-See [STATUS.md](STATUS.md) for the full feature matrix and known limitations.
+// The block a person tapped Run on, plus only the blocks it needs from the same reply.
+let source = Kiln.swiftSource(running: tappedBlock, inReply: reply)
 
----
+// A whole app screen (navigation, List, Form, TabView …) wants the full height.
+let fullHeight = Kiln.looksLikeApp(source)
 
-## How it works
-
-```
-your Swift source
-       │
-       ▼
-   ┌────────┐    ┌────────┐    ┌─────────┐    ┌──────────┐
-   │ Lexer  │───▶│ Parser │───▶│ AST     │───▶│ Renderer │───▶ SwiftUI view
-   └────────┘    └────────┘    │ + State │    └──────────┘
-                               └─────────┘
-                                    │
-                                    ▼
-                              SwiftRunnerState
-                              (variables, @State,
-                               functions, schemas)
+// Check code before showing it: evaluates every view and fires every action once, headless.
+let check = Kiln.validate(source)   // check.isValid, check.errors
 ```
 
-- **Lexer** tokenises Swift source.
-- **Parser** builds a `ViewNode` AST with a forward-reference resolution pass.
-- **ViewBuilder** walks the AST and produces real `AnyView`s.
-- **SwiftRunnerState** is `ObservableObject` + `@Published` — SwiftUI re-renders whenever the source mutates state, exactly like a real `@State` view.
+## What Kiln runs
 
----
+**Swift.** Structs as values (copies, `mutating`, memberwise and custom `init`s, `didSet`), classes as references (`ObservableObject` with `@Published`, `@Observable`), enums with raw values, payloads, `CaseIterable` and methods, closures that capture by reference, `switch` with patterns, ranges, tuples and `where`, `if let` / `guard let` / `while let`, optionals with `?.` and `??`, `defer`, `do` / `catch` / `throw`, extensions on your types and on built-in ones, and `Int` and `Double` kept apart. Runaway loops and runaway recursion are stopped and reported; they never hang the app.
 
-## Examples
+**SwiftUI.** Every `View` struct you write is hosted by a real SwiftUI view, so `@State` lives and dies by SwiftUI's own identity rules, and `@Binding`, `@StateObject`, `@ObservedObject`, `@EnvironmentObject`, `@Environment(\.dismiss)` and `@AppStorage` behave as compiled. `List` (rows, sections, `onDelete`), `Form`, `Section` headers and footers, `Picker` with tags (segmented, menu, wheel), `Stepper`, `Toggle`, `Slider`, `TextField` with text or `value:format:`, `DatePicker`, `NavigationStack` with `navigationDestination`, `TabView`, `.searchable`, sheets, alerts, toolbars, `Timer.publish` with `onReceive`, `withAnimation` and transitions, Swift Charts, custom `Shape`s and `Path`, grids, `GeometryReader`, and about 120 modifiers. Text is formatted the way SwiftUI formats it (`Text("\(1400) pages")` reads "1,400 pages").
 
-[`Examples/LibraryApp.swift`](Examples/LibraryApp.swift) — a complete Open Library search app: live network requests, JSON decode, `NavigationLink` push, per-instance `@State`, async details fetch. Drop it into a `KilnView` to run it.
+**Networking.** `try await URLSession.shared.data(from:)` (or `for:` a `URLRequest`), `dataTask(with:) { … }.resume()`, `URLComponents` and `URLQueryItem`, and `JSONDecoder().decode(T.self, from:)` into your own `Decodable` types, with `CodingKeys`, `.convertFromSnakeCase`, optionals, defaults, nested types and raw-value enums.
 
----
+**Repeatable runs.** Set `Kiln.randomSeed` and `shuffled()`, `randomElement()` and `random(in:)` give the same numbers every run; `KilnRandom(seed:)` gives native Swift the same ones. A host app launched with `-KilnRandomSeed 7` starts seeded, which is handy in UI tests (the memory game above is dealt that way).
+
+## Checked against native SwiftUI
+
+`Lab/` is Kiln Lab, an iOS app that shows each example in [Examples/Apps](Examples/Apps) either compiled natively or run by Kiln. One UI test drives both the same way (tap, type, wait for a timer, swipe to delete) and saves every screen. `Tools/iterate.sh` runs a headless check of every example and of Apple Intelligence's own replies in [Examples/AppleIntelligence](Examples/AppleIntelligence), then the UI tests, and writes a report with native, Kiln, and the blocks that differ side by side.
+
+| Pass | Apps matching native on every step | Labels matching | Apple Intelligence replies that run |
+|---|---|---|---|
+| The original interpreter | 0 of 5 | 0% | 1 of 4 |
+| Kiln engine 2, first run | 1 of 5 | 79% | 5 of 5 |
+| Computed properties read live `@State`; a title bug | 4 of 5 | 98% | 5 of 5 |
+| Seeded runs; `Color` opacity as a style | 5 of 5 | 100% | 5 of 5 |
+| A sixth app (tabs, search, a shared store); SwiftUI's number formatting | 6 of 6 | 100% | 5 of 5 |
+
+## Two engines
+
+`Kiln.run` and `Kiln.validate` use the engine described above. Code written for the original interpreter's guided dialect (`GameCanvas`, `.onTick`, `.onSwipe`, `.dragToMove`, `Storage`, `BarChart(` / `LineChart(`, `Map(latitude:`) still runs on the original interpreter. Set `Kiln.engine = .legacy` to use it for everything.
 
 ## API
 
 ```swift
 public enum Kiln {
-    /// Parse, evaluate, and render Swift source. Pure interpretation — no compile step.
-    @MainActor public static func run(_ code: String) -> KilnResult
+    @MainActor static func run(_ code: String) -> KilnResult
+    @MainActor static func validate(_ code: String, ticks: Int = 8, fuel: Int = 2_000_000) -> KilnValidation
+    static func swiftSource(fromMarkdown markdown: String) -> String
+    static func swiftSource(running block: String, inReply markdown: String) -> String
+    static func looksLikeApp(_ code: String) -> Bool
+    @MainActor static var engine: Engine            // .automatic, .modern, .legacy
+    @MainActor static var randomSeed: UInt64?
+    @MainActor static var hostImageProvider: ((String) -> Image?)?
 }
 
-public struct KilnResult {
-    public let view: AnyView?
-    public let consoleOutput: String
-    public let errors: [String]
-    public var hasView: Bool
-}
-
-public struct KilnView<ErrorContent: View>: View {
-    public init(code: String)
-    public init(code: String, @ViewBuilder errorContent: @escaping ([String]) -> ErrorContent)
-}
+public struct KilnResult { let view: AnyView?; let consoleOutput: String; let errors: [String] }
+public struct KilnValidation { let errors: [String]; let warnings: [String]; var isValid: Bool }
+public struct KilnView<ErrorContent: View>: View { init(code: String) }
+public struct KilnRandom: RandomNumberGenerator { init(seed: UInt64?) }
 ```
-
-That's the whole public surface. Everything else is `internal` and free to evolve.
-
----
 
 ## Limitations
 
-Kiln is an **interpreter**, not a compiler. A handful of patterns aren't covered yet:
+Kiln interprets; it does not compile, so some things are out of reach:
 
-- Custom `init(from decoder: Decoder)` decoders (two-name `(from decoder:)` parameter signature)
-- Nested type declarations (`struct X { struct Y { } }`)
-- Generic type parameters
-- Protocols with associated types
-- `Combine` publishers / subscribers
-- Direct `JSONSerialization.jsonObject(with:)` (use `JSONDecoder` instead)
+- No UIKit or AppKit bridges (`UIViewRepresentable`), no SwiftData or Core Data, no third-party packages.
+- `async` code runs straight through: `Task.sleep` does not wait, and `await URLSession.shared.data(from:)` waits for the response (up to 20 seconds) before the next line runs. `dataTask(with:)` with a completion handler does not wait.
+- Protocols are accepted but conformance is not checked; user-defined property wrappers and result builders are not supported.
 
-When Kiln encounters something it can't handle, it reports a parser error rather than crashing. See [STATUS.md](STATUS.md) for the full list and current roadmap.
-
----
-
-## Performance
-
-- 306 tests, full suite runs in ~2s on M-series Macs.
-- Typical real-world payload (3-400 lines of SwiftUI with `@State` + networking): parses in single-digit ms, renders at SwiftUI's native frame rate after warmup.
-- No allocations in the parsing hot path beyond what Foundation requires.
-
----
+When something is out of reach Kiln reports the line it stopped on instead of crashing.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Use it for whatever you want.
-
----
+MIT. See [LICENSE](LICENSE).
 
 ## Credits
 
-Built by [@jc_builds](https://twitter.com/jc_builds) at [Haplo](https://haplo.app). Originally the live-preview engine in Haplo's iOS app; carved out as a standalone package because other people kept asking for it.
-
-If you ship something cool with Kiln, [tell me about it](https://twitter.com/jc_builds).
+Built by [@jc_builds](https://twitter.com/jc_builds) at [Haplo](https://haploapp.com), where it runs the code in Haplo AI's chat replies.
