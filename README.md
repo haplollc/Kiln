@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.gif" width="864" alt="Three iPhones running apps Kiln built from chat replies in Haplo AI: a habit tracker, an expense tracker with a chart, and a memory game">
+  <img src="assets/banner.gif" width="864" alt="Three iPhones running apps Kiln built from chat replies in Haplo AI: a habit tracker, a dark chess board showing a queen's legal moves, and an expense form">
 </p>
 
 <h1 align="center">Kiln</h1>
@@ -35,10 +35,10 @@ Kiln parses Swift source at runtime and interprets it: structs, classes, enums, 
 
 ## What it looks like
 
-| A habit tracker | An expense tracker | A memory game |
+| A chess game | A habit tracker | An expense tracker |
 |:---:|:---:|:---:|
-| <img src="assets/habits.gif" width="260" alt="Asked for a habit tracker, the reply's code runs in Kiln: habits are checked off, the ring fills and a new habit is added"> | <img src="assets/expenses.gif" width="260" alt="Asked for an expense tracker, the reply's code runs in Kiln: a $12 lunch is added in a sheet and the total and chart update"> | <img src="assets/memory.gif" width="260" alt="Asked for a memory game, the reply's code runs in Kiln and the game is played to a win"> |
-| A `List` with sections and a progress ring that fills as habits are checked off. | Swift Charts, a sheet with a form, and a section per category. | A grid of flipping cards, a move counter and a win message. |
+| <img src="assets/chess.gif" width="260" alt="Asked for a chess game, the reply's code runs in Kiln: legal moves show as dots, pieces slide, and Scholar's mate ends in a checkmate card"> | <img src="assets/habits.gif" width="260" alt="Asked for a habit tracker, the reply's code runs in Kiln: habits are checked off, the ring fills and a new habit is added"> | <img src="assets/expenses.gif" width="260" alt="Asked for an expense tracker, the reply's code runs in Kiln: a $12 lunch is added in a sheet and the total and chart update"> |
+| Legal moves, check and checkmate, castling and promotion; pieces slide on a spring. About 550 lines. | A `List` with sections and a progress ring that fills as habits are checked off. | Swift Charts, a sheet with a form, and a section per category. |
 
 <sub>Staged demos, recorded in the iOS Simulator inside <a href="https://haploapp.com">Haplo AI</a>. The model's replies are scripted so every take has the same code (each is one of the apps in <a href="Examples/Apps">Examples/Apps</a>); tapping Run, the sheet and the app Kiln runs from that code are real, and the taps come from a UI test.</sub>
 
@@ -115,7 +115,7 @@ let check = Kiln.validate(source)   // check.isValid, check.errors
 
 **Networking.** `try await URLSession.shared.data(from:)` (or `for:` a `URLRequest`), `dataTask(with:) { … }.resume()`, `URLComponents` and `URLQueryItem`, and `JSONDecoder().decode(T.self, from:)` into your own `Decodable` types, with `CodingKeys`, `.convertFromSnakeCase`, optionals, defaults, nested types and raw-value enums.
 
-**Repeatable runs.** Set `Kiln.randomSeed` and `shuffled()`, `randomElement()` and `random(in:)` give the same numbers every run; `KilnRandom(seed:)` gives native Swift the same ones. A host app launched with `-KilnRandomSeed 7` starts seeded, which is handy in UI tests (the memory game above is dealt that way).
+**Repeatable runs.** Set `Kiln.randomSeed` and `shuffled()`, `randomElement()` and `random(in:)` give the same numbers every run; `KilnRandom(seed:)` gives native Swift the same ones. A host app launched with `-KilnRandomSeed 7` starts seeded, which is handy in UI tests that need the same deal every run.
 
 ## Checked against native SwiftUI
 

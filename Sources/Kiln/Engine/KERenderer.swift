@@ -494,7 +494,10 @@ struct KRenderer {
             case "italic": t = t.italic()
             case "font": if let f = font(m.first) { t = t.font(f) }
             case "fontWeight": if case .native(.implicit(let w, _))? = m.first { t = t.fontWeight(KBuiltins.weight(w)) }
-            case "foregroundColor", "foregroundStyle": if let c = color(m.first) { t = t.foregroundColor(c) }
+            case "foregroundColor", "foregroundStyle":
+                if let c = color(m.first) { t = t.foregroundColor(c) }
+                // A gradient or material: Text takes any ShapeStyle (iOS 17).
+                else if m.name == "foregroundStyle", let style = shapeStyle(m.first) { t = t.foregroundStyle(style) }
             case "underline": t = t.underline()
             case "strikethrough": t = t.strikethrough()
             case "monospacedDigit": t = t.monospacedDigit()

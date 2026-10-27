@@ -209,6 +209,27 @@ final class AppScenarios: LabCase {
     }
     func testReadingListNative() { reading("native") }
     func testReadingListKiln() { reading("kiln") }
+
+    // MARK: Chess
+
+    func chess(_ mode: String) {
+        launch("Chess", mode)
+        snap("1 start")
+        tap("e2")
+        snap("2 legal moves")
+        // Scholar's mate: 1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4. Qxf7#
+        for square in ["e4", "e7", "e5", "f1", "c4", "b8", "c6", "d1", "h5", "g8", "f6"] {
+            tap(square)
+            Thread.sleep(forTimeInterval: 0.4)
+        }
+        snap("3 queen out")
+        tap("h5")
+        tap("f7")
+        Thread.sleep(forTimeInterval: 0.8)
+        snap("4 checkmate")
+    }
+    func testChessNative() { chess("native") }
+    func testChessKiln() { chess("kiln") }
 }
 
 /// Apple Intelligence's own replies, as Haplo AI receives them. There is no
