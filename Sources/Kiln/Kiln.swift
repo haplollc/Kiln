@@ -177,7 +177,7 @@ public enum Kiln {
 
     /// Convenience flag: returns the latest known version of the Kiln
     /// public API. Bumped on breaking changes.
-    public static let version: String = "0.2.0"
+    public static let version: String = "0.2.1"
 
     // MARK: - Native bridges (host capabilities)
 
