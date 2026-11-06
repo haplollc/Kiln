@@ -159,7 +159,7 @@ scenarios while fixing a bug; `-example /path/to/File.swift` runs any file.
 ## Plan 1 (2026-04-22) — parse-accepted, execution partially stubbed
 
 The following syntactic forms now parse without errors. Execution semantics for most
-arrive in later stages (see `docs/superpowers/plans/2026-04-21-swiftrunner-full-swift-runtime-roadmap.md`).
+arrive in later stages (the roadmap that defined these stages is not in this repository).
 
 **New keywords:** `switch`, `case`, `default`, `do`, `catch`, `try`, `throws`, `throw`,
 `guard`, `defer`, `enum`, `extension`, `protocol`, `async`, `await`.
