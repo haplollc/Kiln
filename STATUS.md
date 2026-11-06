@@ -191,6 +191,11 @@ and any other `@Name` / `@Name(...)` form — consumed transparently at parse ti
 
 ## Currently Supported
 
+> These tables and the roadmap below are an early snapshot of the original
+> interpreter, kept for history. They are out of date: everything the roadmap
+> lists as not yet supported runs on the current engine. See the Engine 2
+> section at the top of this file, and the README, for what Kiln runs today.
+
 ### Views
 | View | Status | Notes |
 |------|--------|-------|
