@@ -10,6 +10,7 @@ import os, re, glob
 here = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.join(here, "..", "Examples", "Apps")
 out_dir = os.path.join(here, "KilnLab", "Native")
+os.makedirs(out_dir, exist_ok=True)  # gitignored, so a fresh clone has no Native/ yet
 names = []
 for path in sorted(glob.glob(os.path.join(src_dir, "*.swift"))):
     name = os.path.splitext(os.path.basename(path))[0]
